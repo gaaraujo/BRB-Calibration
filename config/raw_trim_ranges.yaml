@@ -1,0 +1,19 @@
+# Per-specimen row ranges to trim from raw data (0-based; end null = to end of file).
+# Only list specimens that need trimming. Others use full raw data.
+#
+PC3SB:
+  exclude_ranges: [[26387, 27010], [34963, 35340], [51300, null]]   # trim from first row where deflection/L_y <= -0.04 to end
+PC160:
+  exclude_ranges: [[19475, 20050], [33509, null]]
+PC350:
+  exclude_ranges: [[16500, null]]
+PC500:
+  exclude_ranges: [[19500, null]]
+PC750A:
+  exclude_ranges: [[19500, null]]
+PC750B:
+  exclude_ranges: [[19500, 20200], [42500, null]]
+PC1200A:
+  exclude_ranges: [[16700, null]]
+PC1200B:
+  exclude_ranges: [[16500, 17575], [28747, 30075], [41300, null]]

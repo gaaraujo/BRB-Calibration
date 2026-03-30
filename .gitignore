@@ -1,0 +1,48 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.so
+.venv/
+venv/
+env/
+
+# IDE
+.idea/
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Debug plot OpenSees cache (optional --sim-cache)
+**/_sim_cache/
+
+# Manuscript (separate Git repo; pushes to Overleaf)
+paper/
+
+# Generated logs (optional: mirror with PIPELINE_LOG)
+pipeline_log.txt
+
+# Pipeline-regenerated outputs (see clean_outputs.ps1 / clean_outputs.sh).
+# If these paths were ever committed, stop tracking once with:
+#   git rm -r --cached data/filtered data/resampled data/cycle_points_original data/cycle_points_resampled results/plots results/calibration
+# (keeps files on disk; after commit, only .gitignore applies to new files.)
+data/filtered/
+data/resampled/
+data/cycle_points_original/
+data/cycle_points_resampled/
+results/plots/
+results/calibration/
+
+# Summary tables / rollups (report scripts + generalized optimize).
+summary_statistics/
+
+# Full pipeline zip snapshots (archive_pipeline_outputs.ps1 / .sh)
+run_snapshots/
