@@ -74,8 +74,6 @@ from calibrate.calibration_paths import (  # noqa: E402
 )
 
 _loss = load_calibration_loss_settings(CALIBRATION_LOSS_SETTINGS_CSV)
-ALPHA_FEAT = _loss.alpha_feat
-BETA_ENERGY = _loss.beta_energy
 
 
 
@@ -194,67 +192,26 @@ def _aggregate_by_set(
     return pd.DataFrame(rows)
 
 
+# Detail columns for “best set per specimen” tables and weighted-mean aggregation (metrics CSV schema).
+REPORT_METRIC_COLS: tuple[str, ...] = (
+    "final_J_feat_raw",
+    "final_J_feat_l1_raw",
+    "final_J_E_raw",
+    "final_J_E_l1_raw",
+    "final_unordered_J_binenv",
+    "final_unordered_J_binenv_l1",
+)
+REPORT_METRIC_HEADERS: tuple[str, ...] = (
+    "J_feat",
+    "J_feat_L1",
+    "J_E",
+    "J_E_L1",
+    "J_binenv",
+    "J_binenv_L1",
+)
 
 
-
-def _unordered_metric_cols_for_df(df: pd.DataFrame) -> list[str]:
-    """Columns to carry for cloud / unordered diagnostics (per metrics CSV schema)."""
-    preferred = ("final_unordered_J_binenv", "final_unordered_J_binenv_l1")
-    out = [c for c in preferred if c in df.columns]
-    if out:
-        return out
-    for c in (
-        "final_unordered_J_SNN",
-        "unordered_J_sym",
-        "final_unordered_J_sym",
-        "final_unordered_nn_sym",
-    ):
-        if c in df.columns:
-            return [c]
-    return []
-
-
-
-
-
-def _collect_unordered_metric_cols(*dfs: pd.DataFrame) -> list[str]:
-    """Union of unordered metric columns present on any input frame (preferred pair first)."""
-    preferred = ("final_unordered_J_binenv", "final_unordered_J_binenv_l1")
-    out: list[str] = []
-    for c in preferred:
-        if any(c in d.columns for d in dfs):
-            out.append(c)
-    if out:
-        return out
-    for c in (
-        "final_unordered_J_SNN",
-        "unordered_J_sym",
-        "final_unordered_J_sym",
-        "final_unordered_nn_sym",
-    ):
-        if any(c in d.columns for d in dfs):
-            return [c]
-    return []
-
-
-
-
-
-def _unordered_metric_header(col: str) -> str:
-    return {
-        "final_unordered_J_binenv": "J_binenv",
-        "final_unordered_J_binenv_l1": "J_binenv_L1",
-        "final_unordered_J_SNN": "J_SNN",
-        "unordered_J_sym": "J_sym",
-        "final_unordered_J_sym": "J_sym",
-        "final_unordered_nn_sym": "J_nn_sym",
-    }.get(col, col)
-
-
-
-
-
-def _fmt_unordered_cell(r: pd.Series, col: str) -> str:
+def _fmt_metric_table_cell(r: pd.Series, col: str) -> str:
     if col not in r.index:
         return ""
     v = r.get(col)
@@ -264,17 +221,11 @@ def _fmt_unordered_cell(r: pd.Series, col: str) -> str:
     return _fmt_sci(fv) if np.isfinite(fv) else ""
 
 
-
-
-
 def _best_set_per_specimen(df: pd.DataFrame, mask: pd.Series) -> pd.DataFrame:
     """One row per Name: set_id with minimum final_J_total (tie-break: smallest set_id)."""
-    cols = ["Name", "set_id", "final_J_total", "final_nmse_force", "final_env_error"]
-    cols.extend(_unordered_metric_cols_for_df(df))
+    cols = ["Name", "set_id", "final_J_total", *REPORT_METRIC_COLS]
     sub = df.loc[mask, cols].copy()
     sub["final_J_total"] = pd.to_numeric(sub["final_J_total"], errors="coerce")
-    sub["final_nmse_force"] = pd.to_numeric(sub["final_nmse_force"], errors="coerce")
-    sub["final_env_error"] = pd.to_numeric(sub["final_env_error"], errors="coerce")
     for c in cols:
         if c in (
             "Name",
@@ -284,10 +235,9 @@ def _best_set_per_specimen(df: pd.DataFrame, mask: pd.Series) -> pd.DataFrame:
         if c in sub.columns:
             sub[c] = pd.to_numeric(sub[c], errors="coerce")
     sub = sub[np.isfinite(sub["final_J_total"])]
+    empty_cols = ["Name", "best_set_id", "final_J_total", *REPORT_METRIC_COLS]
     if sub.empty:
-        return pd.DataFrame(
-            columns=["Name", "best_set_id", "final_J_total", "final_nmse_force", "final_env_error"]
-        )
+        return pd.DataFrame(columns=empty_cols)
     sub = sub.sort_values(["Name", "final_J_total", "set_id"])
     out = sub.groupby("Name", sort=True, as_index=False).first()
     return out.rename(columns={"set_id": "best_set_id"})
@@ -518,21 +468,16 @@ def _report_narrative_intro(specimens_path: Path, steel_seed_path: Path) -> list
     else:
         parts.append(f"*(Steel seed file not found: `{steel_seed_path}`)*")
     parts.append("")
-    a, b = ALPHA_FEAT, BETA_ENERGY
+    wf2, we2 = _loss.w_feat_l2, _loss.w_energy_l2
     parts.append("## 3. Objective function")
     parts.append("")
     parts.append(
-        f"The optimization target is the same landmark + energy loss used in **`optimize_brb_mse`**. "
-        f"Let **J_feat** be the cycle-weighted mean squared error of cycle **landmarks** "
-        f"(force error at fixed experimental $u$ for most slots, displacement error at unload for two slots; "
-        f"default uniform **w_c**=1 per cycle; "
-        f"**`--amplitude-weights`** uses amplitude-based **w_c**), and **J_E** the mean squared mismatch of per-cycle "
-        f"**dissipated energy** (|∫F du|), normalized by an experimental scale. The combined "
-        f"objective is **J = {a:g}·J_feat + {b:g}·J_E**; exported metrics record this as "
-        f"**final_J_total**. Auxiliary **NMSE** (force), **envelope**, and unordered cloud-proximity "
-        f"diagnostics (when present in metrics CSVs) are written for interpretation but are not "
-        f"separate additive terms in **J** unless they arise through the "
-        f"feature or energy definitions above."
+        f"The optimization target matches **`optimize_brb_mse`**: a weighted sum of **raw** metrics from "
+        f"``config/calibration/calibration_loss_settings.csv`` — cycle **landmark** error (**J_feat**, L2/L1), "
+        f"per-cycle **energy** mismatch (**J_E**, L2/L1), and **binned cloud** terms (**J_binenv**, L2/L1). "
+        f"Cycle weights **w_c** for **J_feat** default to uniform 1 (**`--amplitude-weights`** uses amplitude-based **w_c**). "
+        f"Example L2 weights from the current loss CSV: **w_feat_l2** = {wf2:g}, **w_energy_l2** = {we2:g}. "
+        f"**final_J_total** is the weighted objective; metrics CSVs store the raw L2/L1 terms and **J_binenv**."
     )
     parts.append("")
     parts.append("## 4. Analyses and what this report contains")
@@ -553,7 +498,7 @@ def _report_narrative_intro(specimens_path: Path, steel_seed_path: Path) -> list
     parts.append("")
     parts.append(
         "**Reported here:** the table *Individual optimize — best set per specimen* (best **set_id**, "
-        "**J**, **NMSE**, envelope error), counts of **evaluable rows** (successful metrics with finite "
+        "**J**, **J_feat**, **J_E**, **J_binenv** columns), counts of **evaluable rows** (successful metrics with finite "
         "**final_J_total**), and *Parameters at each specimen's best set* (one wide row per specimen of "
         "the optimized BRB parameters at that best **set_id**)."
     )
@@ -762,9 +707,7 @@ def main() -> None:
 
 
 
-    metrics_cols = ["final_J_total", "final_nmse_force", "final_env_error"]
-    unordered_metric_cols = _collect_unordered_metric_cols(ind_df, averaged_df, generalized_df)
-    metrics_cols.extend(unordered_metric_cols)
+    metrics_cols = ["final_J_total", *REPORT_METRIC_COLS]
 
     for d in (ind_df, averaged_df, generalized_df):
 
@@ -925,16 +868,12 @@ def main() -> None:
             str(r["Name"]),
             str(int(r["best_set_id"])),
             _fmt_sci(float(r["final_J_total"])),
-            _fmt_sci(float(r["final_nmse_force"])),
-            _fmt_sci(float(r["final_env_error"])),
         ]
-        for uc in unordered_metric_cols:
-            row_cells.append(_fmt_unordered_cell(r, uc))
+        for col in REPORT_METRIC_COLS:
+            row_cells.append(_fmt_metric_table_cell(r, col))
         ir.append(row_cells)
 
-    ind_headers = ["Name", "best_set_id", "J", "NMSE", "env"] + [
-        _unordered_metric_header(c) for c in unordered_metric_cols
-    ]
+    ind_headers = ["Name", "best_set_id", "J", *REPORT_METRIC_HEADERS]
     lines.append(_md_table(ind_headers, ir))
 
     lines.append("")
@@ -975,16 +914,12 @@ def main() -> None:
             str(r["Name"]),
             str(int(r["best_set_id"])),
             _fmt_sci(float(r["final_J_total"])),
-            _fmt_sci(float(r["final_nmse_force"])),
-            _fmt_sci(float(r["final_env_error"])),
         ]
-        for uc in unordered_metric_cols:
-            row_cells.append(_fmt_unordered_cell(r, uc))
+        for col in REPORT_METRIC_COLS:
+            row_cells.append(_fmt_metric_table_cell(r, col))
         pr.append(row_cells)
 
-    avg_headers = ["Name", "best_set_id", "J", "NMSE", "env"] + [
-        _unordered_metric_header(c) for c in unordered_metric_cols
-    ]
+    avg_headers = ["Name", "best_set_id", "J", *REPORT_METRIC_HEADERS]
     lines.append(_md_table(avg_headers, pr))
 
     lines.append("")
@@ -1061,16 +996,12 @@ def main() -> None:
             str(r["Name"]),
             str(int(r["best_set_id"])),
             _fmt_sci(float(r["final_J_total"])),
-            _fmt_sci(float(r["final_nmse_force"])),
-            _fmt_sci(float(r["final_env_error"])),
         ]
-        for uc in unordered_metric_cols:
-            row_cells.append(_fmt_unordered_cell(r, uc))
+        for col in REPORT_METRIC_COLS:
+            row_cells.append(_fmt_metric_table_cell(r, col))
         jr.append(row_cells)
 
-    gen_headers = ["Name", "best_set_id", "J", "NMSE", "env"] + [
-        _unordered_metric_header(c) for c in unordered_metric_cols
-    ]
+    gen_headers = ["Name", "best_set_id", "J", *REPORT_METRIC_HEADERS]
     lines.append(_md_table(gen_headers, jr))
 
     lines.append("")

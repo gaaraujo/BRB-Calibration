@@ -4,7 +4,9 @@ Optimize BRB parameters by minimizing cycle landmark loss plus optional energy l
 Overview
 --------
 Given experimental deformation D_exp (resampled CSV) and force F_exp, the optimizer
-adjusts a subset of SteelMPF / BRB parameters (see PARAMS_TO_OPTIMIZE). For each
+adjusts a subset of SteelMPF / BRB parameters (default ``PARAMS_TO_OPTIMIZE`` in
+``params_to_optimize.py``, optionally overridden per ``set_id`` by
+``config/calibration/set_id_optimize_params.csv``). For each
 trial vector, the corotruss model runs with the same D_exp and returns simulated
 force F_sim (same length as F_exp).
 
@@ -24,7 +26,7 @@ Average squared error over contributing slots within each cycle, then cycle-weig
 
     J_feat = (sum over c of w_c * mean_p e_{c,p}) / (sum over c of w_c)   over cycles with >=1 matched slot
 
-Energy loss J_E (optional, beta_energy > 0)
+Energy loss J_E (optional when ``w_energy_l2`` or ``w_energy_l1`` is nonzero)
 -------------------------------------------
 Per cycle, E_c = |int F du| (trapezoidal rule on the resampled path).
 
@@ -37,15 +39,12 @@ Cycle weights ``w_c`` for ``J_feat`` default to 1 unless you pass ``--amplitude-
 
 Total
 -----
-    J = alpha_feat * J_feat + beta_energy * J_E
+    J = weighted sum of active raw terms (``J_feat`` L2/L1, ``J_E`` L2/L1,
+    ``J_binenv`` L2/L1) using ``config/calibration/calibration_loss_settings.csv``.
 
-Run metrics (initial/final **raw** ``J_feat`` and ``J_E``, weighted contributions
-``alpha*J_feat`` and ``beta*J_E``, and **total** ``J = alpha*J_feat + beta*J_E``) are
-written to ``*_metrics.csv`` next to the optimized parameters CSV. The same file also
-includes global reporting scalars (not in the objective): **NMSE** (mean squared
-``F_sim - F_exp`` over all points, divided by ``S_F^2``) and **envelope error**
-(cycle-wise max/min force mismatch, squared and normalized by ``S_F^2``, mean over
-complete cycles only; ``n_cycles_envelope`` counts those cycles).
+Run metrics (initial/final **raw** ``J_feat`` / ``J_E`` / binenv L2 and L1,
+``J_total``, scalings ``S_F``/``S_D``/``S_E``, and active ``W_*`` weights) are
+written to ``*_metrics.csv`` next to the optimized parameters CSV.
 
 After each successful row, the **final** simulated force history is saved under
 ``results/calibration/individual_optimize/{output_stem}_simulated_force/{Name}_set{set_id}_force_history.npz``
@@ -93,12 +92,7 @@ from calibrate.amplitude_mse_partition import (  # noqa: E402
     energy_mae_cycles,
     energy_mse_cycles,
     energy_scale_s_e,
-    envelope_error_l1_normalized,
-    envelope_error_normalized,
     meta_to_dataframe,
-    nmae_force_normalized,
-    nmse_force_normalized,
-    segment_weighted_normalized_force_l1_l2,
 )
 from calibrate.cycle_feature_loss import (  # noqa: E402
     deformation_scale_s_d,
@@ -106,6 +100,7 @@ from calibrate.cycle_feature_loss import (  # noqa: E402
     feature_mse_cycles,
     load_p_y_kip_catalog,
 )
+from model.brace_geometry import compute_Q  # noqa: E402
 from calibrate.calibration_io import metrics_dataframe  # noqa: E402
 from calibrate.calibration_loss_settings import (  # noqa: E402
     DEFAULT_CALIBRATION_LOSS_SETTINGS,
@@ -118,9 +113,14 @@ from calibrate.calibration_paths import (  # noqa: E402
     OPTIMIZED_BRB_PARAMETERS_PATH,
     PARAM_LIMITS_CSV,
     PLOTS_INDIVIDUAL_OPTIMIZE,
+    SET_ID_OPTIMIZE_PARAMS_CSV,
 )
 from calibrate.param_limits import bounds_dict_for  # noqa: E402
 from calibrate.params_to_optimize import PARAMS_TO_OPTIMIZE  # noqa: E402
+from calibrate.set_id_optimize_params import (  # noqa: E402
+    load_set_id_optimize_params,
+    resolve_optimize_params_for_set_id,
+)
 from calibrate.specimen_weights import catalog_metrics_fields, names_for_individual_optimize  # noqa: E402
 from calibrate.digitized_unordered_eval_lib import compute_unordered_binenv_metrics  # noqa: E402
 from calibrate.lbfgsb_reparam import (  # noqa: E402
@@ -168,9 +168,6 @@ AMPLITUDE_WEIGHT_POWER = DEFAULT_CALIBRATION_LOSS_SETTINGS.amplitude_weight_powe
 AMPLITUDE_WEIGHT_EPS = DEFAULT_CALIBRATION_LOSS_SETTINGS.amplitude_weight_eps
 DEBUG_PARTITION = False  # if True, assert disjoint cover 0..n-1 for cycle partition
 
-# --- Combined objective J = alpha_feat * J_feat + beta_energy * J_E (defaults from loss settings CSV) ---
-ALPHA_FEAT = DEFAULT_CALIBRATION_LOSS_SETTINGS.alpha_feat
-BETA_ENERGY = DEFAULT_CALIBRATION_LOSS_SETTINGS.beta_energy
 # Box limits for L-BFGS-B: ``config/calibration/params_limits.csv`` (``calibration_paths.PARAM_LIMITS_CSV``).
 # Omitted parameters in that file are unbounded. Notes on SteelMPF R-degradation (cR1, cR2, R0)
 # live in comments inside ``params_limits.csv``.
@@ -187,12 +184,6 @@ class LossBreakdown:
     j_e_l2: float
     j_e_l1: float
     j_total: float
-    nmse_l2: float
-    nmse_l1: float
-    env_l2: float
-    env_l1: float
-    seg_force_l1: float
-    seg_force_l2: float
     binenv_l2: float
     binenv_l1: float
 
@@ -204,12 +195,6 @@ def _weighted_objective_from_raw(loss: CalibrationLossSettings, raw: dict[str, f
         ("j_feat_l1", loss.w_feat_l1),
         ("j_e_l2", loss.w_energy_l2),
         ("j_e_l1", loss.w_energy_l1),
-        ("nmse_l2", loss.w_nmse_l2),
-        ("nmse_l1", loss.w_nmse_l1),
-        ("env_l2", loss.w_env_l2),
-        ("env_l1", loss.w_env_l1),
-        ("seg_force_l1", loss.w_seg_force_l1),
-        ("seg_force_l2", loss.w_seg_force_l2),
         ("binenv_l2", loss.w_unordered_binenv_l2),
         ("binenv_l1", loss.w_unordered_binenv_l1),
     ]
@@ -364,10 +349,10 @@ def simulate_and_loss_breakdown(
     *,
     s_d: float,
     loss: CalibrationLossSettings,
-    l_y: float,
     fy_ksi: float,
     a_sc: float,
     L_T: float,
+    L_y: float,
     A_t: float,
     E_ksi: float,
     exp_landmark_cache: dict | None = None,
@@ -381,7 +366,7 @@ def simulate_and_loss_breakdown(
     experimental ``D_exp``/``F_exp`` must keep stable object identity while caching.
 
     When ``full_metrics`` is False, only metrics with **nonzero** loss weights are computed (plus any
-    co-computed pair from the same helper, e.g. segment L1/L2). Omitted entries are left as NaN in
+    co-computed pair from the same helper, e.g. binenv L1/L2). Omitted entries are left as NaN in
     the breakdown; ``j_total`` still matches the weighted sum of active terms. Use ``full_metrics=True``
     for reporting (initial/final CSV rows, eval scripts).
 
@@ -395,6 +380,17 @@ def simulate_and_loss_breakdown(
     s_f = force_scale_s_f(F_exp)
     nan = float("nan")
 
+    dy_in: float | None = None
+    try:
+        Q = float(compute_Q(float(L_T), float(L_y), float(a_sc), float(A_t)))
+        E_hat = Q * float(E_ksi)
+        if np.isfinite(E_hat) and E_hat > 0.0:
+            dy = (float(fy_ksi) / E_hat) * float(L_T)
+            if np.isfinite(dy) and dy > 0.0:
+                dy_in = float(dy)
+    except Exception:
+        dy_in = None
+
     if full_metrics or _loss_weight_active(loss.w_feat_l2):
         j_feat_l2 = feature_mse_cycles(
             D_exp,
@@ -405,6 +401,7 @@ def simulate_and_loss_breakdown(
             s_f=float(s_f),
             fy_ksi=float(fy_ksi),
             A_sc=float(a_sc),
+            dy_in=dy_in,
             exp_landmark_cache=exp_landmark_cache,
         )
     else:
@@ -420,6 +417,7 @@ def simulate_and_loss_breakdown(
             s_f=float(s_f),
             fy_ksi=float(fy_ksi),
             A_sc=float(a_sc),
+            dy_in=dy_in,
             exp_landmark_cache=exp_landmark_cache,
         )
     else:
@@ -452,36 +450,6 @@ def simulate_and_loss_breakdown(
     if compute_e_l1 and j_e_l1 == FAILURE_PENALTY:
         return None
 
-    if full_metrics or _loss_weight_active(loss.w_nmse_l2):
-        nmse_l2 = nmse_force_normalized(F_exp, F_sim)
-    else:
-        nmse_l2 = nan
-    if full_metrics or _loss_weight_active(loss.w_nmse_l1):
-        nmse_l1 = nmae_force_normalized(F_exp, F_sim)
-    else:
-        nmse_l1 = nan
-
-    if full_metrics or _loss_weight_active(loss.w_env_l2):
-        env_l2, _nc2 = envelope_error_normalized(F_exp, F_sim, amp_meta)
-    else:
-        env_l2 = nan
-    if full_metrics or _loss_weight_active(loss.w_env_l1):
-        env_l1, _nc1 = envelope_error_l1_normalized(F_exp, F_sim, amp_meta)
-    else:
-        env_l1 = nan
-
-    if full_metrics or _loss_weight_active(loss.w_seg_force_l1) or _loss_weight_active(loss.w_seg_force_l2):
-        seg_l1, seg_l2 = segment_weighted_normalized_force_l1_l2(
-            D_exp,
-            F_exp,
-            F_sim,
-            l_y=float(l_y),
-            fy_ksi=float(fy_ksi),
-            a_sc=float(a_sc),
-        )
-    else:
-        seg_l1, seg_l2 = nan, nan
-
     if full_metrics or _loss_weight_active(loss.w_unordered_binenv_l2) or _loss_weight_active(
         loss.w_unordered_binenv_l1
     ):
@@ -494,12 +462,6 @@ def simulate_and_loss_breakdown(
         "j_feat_l1": float(j_feat_l1),
         "j_e_l2": float(j_e_l2),
         "j_e_l1": float(j_e_l1),
-        "nmse_l2": float(nmse_l2),
-        "nmse_l1": float(nmse_l1),
-        "env_l2": float(env_l2),
-        "env_l1": float(env_l1),
-        "seg_force_l1": float(seg_l1),
-        "seg_force_l2": float(seg_l2),
         "binenv_l2": float(binenv_l2),
         "binenv_l1": float(binenv_l1),
     }
@@ -512,39 +474,19 @@ def simulate_and_loss_breakdown(
         j_e_l2=raw["j_e_l2"],
         j_e_l1=raw["j_e_l1"],
         j_total=j_total,
-        nmse_l2=raw["nmse_l2"],
-        nmse_l1=raw["nmse_l1"],
-        env_l2=raw["env_l2"],
-        env_l1=raw["env_l1"],
-        seg_force_l1=raw["seg_force_l1"],
-        seg_force_l2=raw["seg_force_l2"],
         binenv_l2=raw["binenv_l2"],
         binenv_l1=raw["binenv_l1"],
     )
 
 
-def _l_y_from_params_row(prow: pd.Series) -> float:
-    if "L_y" in prow.index and pd.notna(prow.get("L_y")):
-        return float(prow["L_y"])
-    return float("nan")
-
-
 def _loss_weight_snapshot(loss: CalibrationLossSettings) -> dict[str, float]:
     return {
-        "ALPHA_FEAT": float(loss.alpha_feat),
-        "BETA_ENERGY": float(loss.beta_energy),
         "W_FEAT_L2": float(loss.w_feat_l2),
         "W_FEAT_L1": float(loss.w_feat_l1),
         "W_ENERGY_L2": float(loss.w_energy_l2),
         "W_ENERGY_L1": float(loss.w_energy_l1),
-        "W_NMSE_L2": float(loss.w_nmse_l2),
-        "W_NMSE_L1": float(loss.w_nmse_l1),
-        "W_ENV_L2": float(loss.w_env_l2),
-        "W_ENV_L1": float(loss.w_env_l1),
         "W_UNORDERED_BINENV_L2": float(loss.w_unordered_binenv_l2),
         "W_UNORDERED_BINENV_L1": float(loss.w_unordered_binenv_l1),
-        "W_SEG_FORCE_L1": float(loss.w_seg_force_l1),
-        "W_SEG_FORCE_L2": float(loss.w_seg_force_l2),
     }
 
 
@@ -557,15 +499,7 @@ def _metrics_dict_nan_prefix(prefix: str) -> dict[str, float]:
         f"{p}_J_feat_l1_raw": z,
         f"{p}_J_E_raw": z,
         f"{p}_J_E_l1_raw": z,
-        f"{p}_alpha_J_feat": z,
-        f"{p}_beta_J_E": z,
         f"{p}_J_total": z,
-        f"{p}_nmse_force": z,
-        f"{p}_nmse_force_l1": z,
-        f"{p}_env_error": z,
-        f"{p}_env_error_l1": z,
-        f"{p}_seg_force_l1": z,
-        f"{p}_seg_force_l2": z,
         f"{p}_unordered_J_binenv": z,
         f"{p}_unordered_J_binenv_l1": z,
     }
@@ -584,15 +518,7 @@ def _metrics_dict_for_breakdown(
             f"{p}_J_feat_l1_raw": float("nan"),
             f"{p}_J_E_raw": float(FAILURE_PENALTY),
             f"{p}_J_E_l1_raw": float("nan"),
-            f"{p}_alpha_J_feat": float("nan"),
-            f"{p}_beta_J_E": float("nan"),
             f"{p}_J_total": float(FAILURE_PENALTY),
-            f"{p}_nmse_force": float("nan"),
-            f"{p}_nmse_force_l1": float("nan"),
-            f"{p}_env_error": float("nan"),
-            f"{p}_env_error_l1": float("nan"),
-            f"{p}_seg_force_l1": float("nan"),
-            f"{p}_seg_force_l2": float("nan"),
             f"{p}_unordered_J_binenv": float("nan"),
             f"{p}_unordered_J_binenv_l1": float("nan"),
         }
@@ -601,15 +527,7 @@ def _metrics_dict_for_breakdown(
         f"{p}_J_feat_l1_raw": float(bd.j_feat_l1),
         f"{p}_J_E_raw": float(bd.j_e_l2),
         f"{p}_J_E_l1_raw": float(bd.j_e_l1),
-        f"{p}_alpha_J_feat": float(loss.w_feat_l2 * bd.j_feat_l2),
-        f"{p}_beta_J_E": float(loss.w_energy_l2 * bd.j_e_l2),
         f"{p}_J_total": float(bd.j_total),
-        f"{p}_nmse_force": float(bd.nmse_l2),
-        f"{p}_nmse_force_l1": float(bd.nmse_l1),
-        f"{p}_env_error": float(bd.env_l2),
-        f"{p}_env_error_l1": float(bd.env_l1),
-        f"{p}_seg_force_l1": float(bd.seg_force_l1),
-        f"{p}_seg_force_l2": float(bd.seg_force_l2),
         f"{p}_unordered_J_binenv": float(bd.binenv_l2),
         f"{p}_unordered_J_binenv_l1": float(bd.binenv_l1),
     }
@@ -630,7 +548,6 @@ def optimize_one_specimen(
 ) -> tuple[pd.Series, LossBreakdown | None, LossBreakdown | None, np.ndarray | None, np.ndarray | None]:
     """Return optimized row, initial/final ``LossBreakdown`` (or None), and simulated forces."""
     fixed_params = _row_to_sim_params(prow)
-    l_y_eval = _l_y_from_params_row(prow)
     fy_ksi = float(prow["fyp"])
     a_sc = float(prow["A_sc"])
     use_norm, Ls, Us, x0, scipy_bounds = prepare_lbfgsb_parameterization(
@@ -657,10 +574,10 @@ def optimize_one_specimen(
             amp_meta,
             s_d=s_d,
             loss=loss,
-            l_y=l_y_eval,
             fy_ksi=fy_ksi,
             a_sc=a_sc,
             L_T=float(prow["L_T"]),
+            L_y=float(prow["L_y"]),
             A_t=float(prow["A_t"]),
             E_ksi=float(prow["E"]),
             exp_landmark_cache=exp_landmark_cache,
@@ -881,8 +798,8 @@ def main() -> None:
     """CLI entry point."""
     parser = argparse.ArgumentParser(
         description=(
-            "Optimize BRB parameters: alpha_feat * J_feat + beta_energy * J_E "
-            "(weights from config/calibration/calibration_loss_settings.csv unless overridden)."
+            "Optimize BRB parameters: weighted sum of raw J_feat / J_E / J_binenv (L2/L1) "
+            "per config/calibration/calibration_loss_settings.csv unless overridden."
         ),
     )
     parser.add_argument(
@@ -931,13 +848,28 @@ def main() -> None:
             f"Default: {_pl_rel}."
         ),
     )
+    _sip_rel = SET_ID_OPTIMIZE_PARAMS_CSV
+    try:
+        _sip_rel = SET_ID_OPTIMIZE_PARAMS_CSV.relative_to(_PROJECT_ROOT)
+    except ValueError:
+        pass
+    parser.add_argument(
+        "--set-id-optimize-params",
+        type=Path,
+        default=None,
+        help=(
+            "Optional CSV: set_id, optimize_params (comma-separated names). "
+            f"Default path if omitted: {_sip_rel}. If missing, use PARAMS_TO_OPTIMIZE for every set_id."
+        ),
+    )
     parser.add_argument(
         "--loss-settings",
         type=Path,
         default=None,
         help=(
-            "CSV with alpha_feat, beta_energy, use_amplitude_weights, and optional "
-            f"amplitude_weight_power / amplitude_weight_eps. Default: {_ls_rel}."
+            "CSV: required w_feat_l2, w_energy_l2, use_amplitude_weights; optional w_feat_l1, "
+            "w_energy_l1, w_unordered_binenv_l2/l1, amplitude_weight_power / amplitude_weight_eps. "
+            f"Default: {_ls_rel}."
         ),
     )
     parser.add_argument(
@@ -962,14 +894,30 @@ def main() -> None:
         else loss.use_amplitude_weights
     )
 
-    print(f"Optimizing parameters: {', '.join(PARAMS_TO_OPTIMIZE)}")
+    optimize_by_set_id = load_set_id_optimize_params(
+        Path(args.set_id_optimize_params).expanduser().resolve()
+        if args.set_id_optimize_params is not None
+        else None
+    )
+    if optimize_by_set_id:
+        _sip_show = (
+            Path(args.set_id_optimize_params).expanduser().resolve()
+            if args.set_id_optimize_params is not None
+            else SET_ID_OPTIMIZE_PARAMS_CSV
+        )
+        print(f"Per-set_id optimize params CSV: {_sip_show}")
+    else:
+        print(
+            "Per-set_id optimize params: (file missing or empty) — using "
+            f"PARAMS_TO_OPTIMIZE from params_to_optimize.py: {', '.join(PARAMS_TO_OPTIMIZE)}"
+        )
     print(f"Initial parameters CSV: {initial_path}")
     _limits_p = Path(args.param_limits).expanduser().resolve() if args.param_limits else PARAM_LIMITS_CSV
     print(f"Parameter limits CSV: {_limits_p}")
     print(f"Loss settings CSV: {loss_csv}")
     print(
-        "Loss reporting: raw J_feat (L2/L1), J_E (L2/L1), NMSE, envelope, segment-force, cloud metrics; "
-        f"J_total = weighted sum (see loss CSV). Default-style: w_feat_l2={loss.w_feat_l2:g}, "
+        "Loss reporting: raw J_feat (L2/L1), J_E (L2/L1), J_binenv (L2/L1); "
+        f"J_total = weighted sum (see loss CSV). w_feat_l2={loss.w_feat_l2:g}, "
         f"w_energy_l2={loss.w_energy_l2:g}."
     )
     print(
@@ -1010,10 +958,13 @@ def main() -> None:
     else:
         specimens = available
 
-    bounds_dict = bounds_dict_for(
-        list(PARAMS_TO_OPTIMIZE),
-        limits_path=args.param_limits,
-    )
+    bounds_cache: dict[tuple[str, ...], dict[str, tuple[float, float]]] = {}
+
+    def _bounds_for_active(active: list[str]) -> dict[str, tuple[float, float]]:
+        key = tuple(active)
+        if key not in bounds_cache:
+            bounds_cache[key] = bounds_dict_for(list(active), limits_path=args.param_limits)
+        return bounds_cache[key]
 
     out_rows = []
     metrics_rows: list[dict] = []
@@ -1049,11 +1000,6 @@ def main() -> None:
         s_d_ref = deformation_scale_s_d(D_exp)
         s_e_ref = energy_scale_s_e(D_exp, F_exp)
         n_cycles = len(amp_meta)
-        n_cycles_envelope = sum(
-            1
-            for m in amp_meta
-            if not m.get("incomplete", False) and int(m["end"]) > int(m["start"])
-        )
         rows_for_specimen = params_df[params_df["Name"].astype(str) == sid]
         if rows_for_specimen.empty:
             print(f"  Skipping {sid}: no row in {initial_path.name}")
@@ -1069,6 +1015,12 @@ def main() -> None:
         CYCLE_WEIGHT_PLOTS_DIR.mkdir(parents=True, exist_ok=True)
         for _, prow in rows_for_specimen.iterrows():
             try:
+                active = resolve_optimize_params_for_set_id(
+                    optimize_by_set_id,
+                    prow.get("set_id"),
+                    list(PARAMS_TO_OPTIMIZE),
+                )
+                bd_local = _bounds_for_active(active)
                 (
                     out_row,
                     bd_initial,
@@ -1081,8 +1033,8 @@ def main() -> None:
                     D_exp,
                     F_exp,
                     amp_meta,
-                    PARAMS_TO_OPTIMIZE,
-                    bounds_dict,
+                    active,
+                    bd_local,
                     p_y_ref=p_y_specimen,
                     s_d=s_d_ref,
                     loss=loss,
@@ -1114,7 +1066,7 @@ def main() -> None:
                 mf = _metrics_dict_for_breakdown(bd_final, loss, "final")
                 j1 = mf["final_J_total"]
                 cw = 14
-                print(f"  {sid} (set {set_id})")
+                print(f"  {sid} (set {set_id})  optimize: {', '.join(active)}")
                 print(
                     f"    {'':10} {'J_feat_L2':>{cw}} {'J_feat_L1':>{cw}} {'J_E_L2':>{cw}} {'J_E_L1':>{cw}} "
                     f"{'J_total':>{cw}}"
@@ -1128,11 +1080,8 @@ def main() -> None:
                     f"{mf['final_J_E_raw']:>{cw}.6g} {mf['final_J_E_l1_raw']:>{cw}.6g} {mf['final_J_total']:>{cw}.6g}"
                 )
                 print(
-                    f"    {'report':10} NMSE_L2={mf['final_nmse_force']:.6g}  NMSE_L1={mf['final_nmse_force_l1']:.6g}  "
-                    f"env_L2={mf['final_env_error']:.6g}  env_L1={mf['final_env_error_l1']:.6g}  "
-                    f"segF_L1={mf['final_seg_force_l1']:.6g}  segF_L2={mf['final_seg_force_l2']:.6g}  "
-                    f"J_binenv_L2={mf['final_unordered_J_binenv']:.6g}  "
-                    f"N_c env={n_cycles_envelope}"
+                    f"    {'report':10} J_binenv_L2={mf['final_unordered_J_binenv']:.6g}  "
+                    f"J_binenv_L1={mf['final_unordered_J_binenv_l1']:.6g}"
                 )
                 wsnap = _loss_weight_snapshot(loss)
                 metrics_rows.append(
@@ -1147,7 +1096,6 @@ def main() -> None:
                         "aggregate_by_set_id": False,
                         **mi,
                         **mf,
-                        "n_cycles_envelope": n_cycles_envelope,
                         **wsnap,
                         "S_F": s_f_ref,
                         "S_D": s_d_ref,
@@ -1186,7 +1134,12 @@ def main() -> None:
             full_rows.append(opt_map[k])
         else:
             row = prow.copy()
-            for p in PARAMS_TO_OPTIMIZE:
+            active_skip = resolve_optimize_params_for_set_id(
+                optimize_by_set_id,
+                prow.get("set_id"),
+                list(PARAMS_TO_OPTIMIZE),
+            )
+            for p in active_skip:
                 row[p] = np.nan
             full_rows.append(row)
 
@@ -1218,7 +1171,6 @@ def main() -> None:
                 "calibration_stage": "optimize",
                 "aggregate_by_set_id": False,
                 **nan_bd,
-                "n_cycles_envelope": 0,
                 **_loss_weight_snapshot(loss),
                 "S_F": np.nan,
                 "S_D": np.nan,

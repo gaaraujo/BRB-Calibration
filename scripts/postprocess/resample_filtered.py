@@ -1,6 +1,6 @@
 """
 Resample filtered ``force_deformation.csv`` (path-ordered) or filtered deformation drive (digitized)
-into ``data/resampled/{Name}/`` using |Deltau| spacing from Dy/10.
+into ``data/resampled/{Name}/`` using |Deltau| spacing from Dy/4.
 
 Reads landmarks from ``data/cycle_points_original/{Name}.json`` (filtered grid). Writes
 ``data/cycle_points_resampled/{Name}.json`` with indices for the resampled length.

@@ -1,6 +1,11 @@
 """
-Weighted mean of PARAMS_TO_OPTIMIZE from a parameters CSV, apply to every row,
-simulate, write parameters CSV + metrics CSV + hysteresis plots + NPZ and CSV force histories.
+Weighted mean of steel parameters from a parameters CSV (default columns from
+``params_to_optimize.PARAMS_TO_OPTIMIZE``), apply to every row, simulate, write parameters CSV +
+metrics CSV + hysteresis plots + NPZ and CSV force histories.
+
+Optional ``config/calibration/set_id_optimize_params.csv`` overrides which columns are averaged and
+merged per ``set_id``. Pooled mode (``--no-by-set-id``) requires identical resolved lists across
+training ``set_id``s when that file is present.
 
 Weights: ``make_averaged_weight_fn()`` from ``calibrate.specimen_weights`` -- ``averaged_weight`` on
 path-ordered rows (unordered digitized rows have effective weight 0 for averaging).
@@ -81,8 +86,16 @@ from calibrate.calibration_paths import (  # noqa: E402
     CALIBRATION_LOSS_SETTINGS_CSV,
     OPTIMIZED_BRB_PARAMETERS_PATH,
     PLOTS_AVERAGED_OPTIMIZE,
+    SET_ID_OPTIMIZE_PARAMS_CSV,
 )
 from calibrate.pipeline_log import kv, line, run_banner, saved_artifacts, section  # noqa: E402
+from calibrate.set_id_optimize_params import (  # noqa: E402
+    build_param_cols_by_set_id_from_mapping,
+    load_set_id_optimize_params,
+    resolve_optimize_params_for_set_id,
+    union_param_cols,
+    unique_weighted_train_set_ids,
+)
 from calibrate.specimen_weights import (  # noqa: E402
     catalog_metrics_fields,
     make_averaged_weight_fn,
@@ -113,8 +126,8 @@ def main() -> None:
     """CLI entry point."""
     p = argparse.ArgumentParser(
         description=(
-            "Weighted mean of PARAMS_TO_OPTIMIZE; evaluate on resampled specimens and "
-            "digitized unordered specimens (deformation history + overlays); "
+            "Weighted mean of steel parameters (default PARAMS_TO_OPTIMIZE); evaluate on resampled "
+            "specimens and digitized unordered specimens (deformation history + overlays); "
             "write parameters CSV, metrics CSV, plots, NPZ and CSV simulated histories."
         ),
     )
@@ -169,8 +182,9 @@ def main() -> None:
         type=Path,
         default=None,
         help=(
-            "CSV with w_feat_l2, w_energy_l2, optional L1/other weights, use_amplitude_weights, "
-            f"and optional amplitude_weight_power / amplitude_weight_eps. Default: {_ls_rel}."
+            "CSV: required w_feat_l2, w_energy_l2, use_amplitude_weights; optional w_feat_l1, "
+            "w_energy_l1, w_unordered_binenv_l2/l1, amplitude_weight_power / amplitude_weight_eps. "
+            f"Default: {_ls_rel}."
         ),
     )
     p.add_argument(
@@ -178,6 +192,20 @@ def main() -> None:
         action=argparse.BooleanOptionalAction,
         default=None,
         help=AMPLITUDE_WEIGHTS_ARG_HELP,
+    )
+    _so_rel = SET_ID_OPTIMIZE_PARAMS_CSV
+    try:
+        _so_rel = SET_ID_OPTIMIZE_PARAMS_CSV.relative_to(_PROJECT_ROOT)
+    except ValueError:
+        pass
+    p.add_argument(
+        "--set-id-optimize-params",
+        type=Path,
+        default=None,
+        help=(
+            "Optional CSV: set_id, optimize_params (overrides PARAMS_TO_OPTIMIZE per set_id). "
+            f"Default: {_so_rel}."
+        ),
     )
     args = p.parse_args()
 
@@ -215,12 +243,42 @@ def main() -> None:
     weight_fn = make_averaged_weight_fn(catalog)
     weight_tag = weight_config_tag(catalog)
 
-    averaged_dict = compute_weighted_averaged_param_dict(
-        params_df,
-        list(PARAMS_TO_OPTIMIZE),
-        by_set_id=by_set_id,
-        weight_fn=weight_fn,
+    default_list = list(PARAMS_TO_OPTIMIZE)
+    opt_csv = (
+        Path(args.set_id_optimize_params).expanduser().resolve()
+        if args.set_id_optimize_params
+        else SET_ID_OPTIMIZE_PARAMS_CSV
     )
+    opt_map = load_set_id_optimize_params(opt_csv)
+    pool_set_ids = unique_weighted_train_set_ids(params_df, weight_fn)
+    if by_set_id:
+        param_cols_by_set_id = (
+            build_param_cols_by_set_id_from_mapping(opt_map, default_list, set_ids=pool_set_ids)
+            if opt_map
+            else None
+        )
+        pool_param_cols = union_param_cols(default_list, param_cols_by_set_id)
+        averaged_dict = compute_weighted_averaged_param_dict(
+            params_df,
+            pool_param_cols,
+            by_set_id=True,
+            weight_fn=weight_fn,
+            param_cols_by_set_id=param_cols_by_set_id,
+        )
+    else:
+        w_series = params_df["Name"].astype(str).map(weight_fn)
+        train_set_ids = params_df.loc[w_series > 0.0, "set_id"].tolist()
+        global_active = (
+            assert_global_optimize_params_consistent(opt_map, train_set_ids, default_list)
+            if opt_map
+            else default_list
+        )
+        averaged_dict = compute_weighted_averaged_param_dict(
+            params_df,
+            global_active,
+            by_set_id=False,
+            weight_fn=weight_fn,
+        )
 
     resampled_stems = path_ordered_resampled_force_csv_stems(catalog, project_root=_PROJECT_ROOT)
     param_names = set(params_df["Name"].astype(str))
@@ -241,7 +299,11 @@ def main() -> None:
         available_resampled = [args.specimen] if args.specimen in available_resampled else []
         available_unordered = [args.specimen] if args.specimen in available_unordered else []
 
-    kv("PARAMS_TO_OPTIMIZE", str(PARAMS_TO_OPTIMIZE))
+    kv("PARAMS_TO_OPTIMIZE (default)", str(PARAMS_TO_OPTIMIZE))
+    if opt_map:
+        kv("set_id optimize params CSV", str(opt_csv))
+    else:
+        kv("set_id optimize params", f"(none); optional {SET_ID_OPTIMIZE_PARAMS_CSV}")
     kv("by_set_id", str(by_set_id))
     kv("weights", repr(weight_tag))
     kv("loss settings CSV", str(loss_csv))
@@ -281,11 +343,6 @@ def main() -> None:
         s_d_ref = deformation_scale_s_d(D_exp)
         s_e_ref = energy_scale_s_e(D_exp, F_exp)
         n_cycles = len(amp_meta)
-        n_cycles_envelope = sum(
-            1
-            for m in amp_meta
-            if not m.get("incomplete", False) and int(m["end"]) > int(m["start"])
-        )
 
         prow_block = params_df[params_df["Name"].astype(str) == sid]
         if prow_block.empty:
@@ -313,7 +370,8 @@ def main() -> None:
                 line(f"skip {sid} set {set_id}: {e}")
                 continue
 
-            eval_row = merge_averaged_into_row(prow, averaged_vec, list(PARAMS_TO_OPTIMIZE))
+            active = resolve_optimize_params_for_set_id(opt_map, set_id, default_list)
+            eval_row = merge_averaged_into_row(prow, averaged_vec, active)
 
             try:
                 F_sim = np.asarray(
@@ -328,11 +386,6 @@ def main() -> None:
                 line(f"{sid} set {set_id}: length mismatch sim vs exp")
                 continue
 
-            l_y_ev = (
-                float(eval_row["L_y"])
-                if "L_y" in eval_row.index and pd.notna(eval_row.get("L_y"))
-                else float("nan")
-            )
             bd = simulate_and_loss_breakdown(
                 D_exp,
                 F_exp,
@@ -340,10 +393,10 @@ def main() -> None:
                 amp_meta,
                 s_d=s_d_ref,
                 loss=loss,
-                l_y=l_y_ev,
                 fy_ksi=float(eval_row["fyp"]),
                 a_sc=float(eval_row["A_sc"]),
                 L_T=float(eval_row["L_T"]),
+                L_y=float(eval_row["L_y"]),
                 A_t=float(eval_row["A_t"]),
                 E_ksi=float(eval_row["E"]),
                 exp_landmark_cache=exp_landmark_cache,
@@ -433,7 +486,6 @@ def main() -> None:
                     "aggregate_by_set_id": by_set_id,
                     **mi,
                     **mf,
-                    "n_cycles_envelope": n_cycles_envelope,
                     **_loss_weight_snapshot(loss),
                     "S_F": s_f_ref,
                     "S_D": s_d_ref,
@@ -444,8 +496,7 @@ def main() -> None:
                 }
             )
             line(
-                f"{sid} set {set_id}: J={jtot:.6g}  NMSE_L2={bd.nmse_l2:.6g}  "
-                f"env_L2={bd.env_l2:.6g}  "
+                f"{sid} set {set_id}: J={jtot:.6g}  "
                 f"J_binenv={cloud.J_binenv:.6g}"
             )
 
@@ -490,7 +541,8 @@ def main() -> None:
                 line(f"skip {sid} set {set_id}: {e}")
                 continue
 
-            eval_row = merge_averaged_into_row(prow, averaged_vec, list(PARAMS_TO_OPTIMIZE))
+            active = resolve_optimize_params_for_set_id(opt_map, set_id, default_list)
+            eval_row = merge_averaged_into_row(prow, averaged_vec, active)
             sim_row = eval_row_with_envelope_bn_from_unordered(eval_row, cat_row, u_c, F_c)
 
             try:
@@ -587,7 +639,6 @@ def main() -> None:
                     "final_unordered_J_binenv": cloud.J_binenv,
                     "initial_unordered_J_binenv_l1": cloud.J_binenv_l1,
                     "final_unordered_J_binenv_l1": cloud.J_binenv_l1,
-                    "n_cycles_envelope": 0,
                     **_loss_weight_snapshot(loss),
                     "S_F": s_f_unordered,
                     "S_D": s_d_ref,
@@ -608,8 +659,9 @@ def main() -> None:
     for _, prow in params_df.iterrows():
         set_id = prow.get("set_id", "?")
         averaged_vec = get_averaged_for_set_id(averaged_dict, set_id, by_set_id=by_set_id)
+        active_out = resolve_optimize_params_for_set_id(opt_map, set_id, default_list)
         specimen_set_param_rows.append(
-            merge_averaged_into_row(prow, averaged_vec, list(PARAMS_TO_OPTIMIZE)).to_dict()
+            merge_averaged_into_row(prow, averaged_vec, active_out).to_dict()
         )
     p_df = pd.DataFrame(specimen_set_param_rows)
     p_df = p_df[params_df.columns.tolist()]

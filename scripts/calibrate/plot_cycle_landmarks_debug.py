@@ -2,11 +2,16 @@
 Debug: overlay J_feat landmark points on experimental vs simulated hysteresis.
 
 Twelve landmarks per weight cycle (yield/peak/subpath construction; ``F_thr = f_y A_sc``).
-Experimental landmarks are circles, simulated pairs as triangles. Optional CSV of experimental
-landmarks per cycle.
+For non–F=0 slots, exp/sim pairs share the same displacement-grid index (nearest vertex to each
+target ``d_e`` in the slot path window). F=0 extremal slots keep interpolated crossings on each curve.
+Circles are experimental, triangles simulated, with a connector when both exist. Optional CSV: per-cycle experimental ``d_k,f_k`` (grid-snapped), simulated ``d_sim_k,f_sim_k``,
+``w_c``, ``j_feat_l2_mean`` / ``j_feat_l1_mean`` (calibration ``J_feat``), and ``n_jfeat_slots`` /
+``jfeat_contributes``.
 
 Same inputs as optimize_brb_mse / plot_cycle_energy_debug (resampled CSV, cycle points,
-parameters CSV). Requires OpenSees for run_simulation.
+parameters CSV). Requires OpenSees for run_simulation. Yield displacement ``Dy`` for landmark
+gating is computed from the params row: ``(fyp/E_hat)*L_T`` via ``yield_displacement_dy_in``,
+with fallback ``(fyp/E)*L_y`` when that is not finite.
 
 Example:
   python scripts/calibrate/plot_cycle_landmarks_debug.py --specimen PC160
@@ -31,7 +36,7 @@ sys.path.insert(0, str(_SCRIPTS / "postprocess"))
 
 from calibrate.pipeline_log import line, run_banner, section  # noqa: E402
 from calibrate.amplitude_mse_partition import build_amplitude_weights  # noqa: E402
-from calibrate.optimize_brb_mse import AMPLITUDE_WEIGHTS_ARG_HELP  # noqa: E402
+from calibrate.optimize_brb_mse import AMPLITUDE_WEIGHTS_ARG_HELP, force_scale_s_f  # noqa: E402
 from calibrate.debug_sim_cache import (  # noqa: E402
     save_fsim_cache,
     try_load_cached_fsim,
@@ -39,9 +44,12 @@ from calibrate.debug_sim_cache import (  # noqa: E402
 from calibrate.cycle_feature_loss import (  # noqa: E402
     LANDMARK_EXP_CSV_COLUMNS,
     N_LANDMARK_SLOTS,
+    deformation_scale_s_d,
     extract_cycle_landmarks,
+    jfeat_means_from_paired_landmarks,
     landmark_exp_row_dict,
     pair_sim_cycle_landmarks,
+    yield_displacement_dy_in,
 )
 from model.corotruss import run_simulation  # noqa: E402
 from postprocess.cycle_points import find_cycle_points, load_cycle_points_resampled  # noqa: E402
@@ -80,6 +88,13 @@ plt.rcParams["axes.facecolor"] = "white"
 configure_matplotlib_style()
 
 
+def _meta_cycle_weight_w_c(meta_row: dict) -> float:
+    w = float(meta_row.get("w_c", 1.0))
+    if not np.isfinite(w) or w <= 0.0:
+        return 1.0
+    return w
+
+
 def _row_to_sim_params(prow: pd.Series) -> dict:
     """Map params CSV row to run_simulation keyword arguments."""
     keys = ("L_T", "L_y", "A_sc", "A_t", "fyp", "fyn", "E", "b_p", "b_n", "R0", "cR1", "cR2", "a1", "a2", "a3", "a4")
@@ -111,6 +126,24 @@ def plot_landmark_overlay(
     F_s_n = np.asarray(F_sim, dtype=float) / fyA
     fyp = float(params_row["fyp"])
     a_sc = float(params_row["A_sc"])
+    E_ksi = float(params_row["E"])
+    L_T_in = float(params_row["L_T"])
+    L_y_in_row = float(params_row["L_y"])
+    A_t = float(params_row["A_t"])
+    dy_in = yield_displacement_dy_in(
+        fy_ksi=fyp,
+        E_ksi=E_ksi,
+        L_T_in=L_T_in,
+        L_y_in=L_y_in_row,
+        A_sc_in2=a_sc,
+        A_t_in2=A_t,
+    )
+    if not (np.isfinite(dy_in) and dy_in > 0.0) and np.isfinite(E_ksi) and E_ksi > 0.0:
+        if np.isfinite(L_y_in_row) and L_y_in_row > 0.0:
+            dy_in = float((fyp / E_ksi) * L_y_in_row)
+
+    s_f = float(force_scale_s_f(F_exp))
+    s_d = float(deformation_scale_s_d(D_exp))
 
     fig, ax = plt.subplots(figsize=SINGLE_FIGSIZE_IN)
     ax.plot(
@@ -145,17 +178,26 @@ def plot_landmark_overlay(
                         le,
                         fy_ksi=fyp,
                         a_sc=a_sc,
+                        ls=ls,
+                        w_c=_meta_cycle_weight_w_c(m),
+                        j_feat_l2_mean=float("nan"),
+                        j_feat_l1_mean=float("nan"),
+                        n_jfeat_slots=0,
+                        jfeat_contributes=False,
                     )
                 )
             continue
         color = cmap(k % 10)
 
         le = extract_cycle_landmarks(
-            D_exp, F_exp, s, e, fy_ksi=fyp, a_sc=a_sc
+            D_exp, F_exp, s, e, fy_ksi=fyp, a_sc=a_sc, dy_in=dy_in
         )
-        ls = pair_sim_cycle_landmarks(
-            D_exp, F_sim, s, e, le, fy_ksi=fyp, a_sc=a_sc
+        ls, le_m = pair_sim_cycle_landmarks(
+            D_exp, F_exp, F_sim, s, e, le, fy_ksi=fyp, a_sc=a_sc
         )
+
+        j2, j1, n_jf = jfeat_means_from_paired_landmarks(le_m, ls, s_f, s_d)
+        w_c = _meta_cycle_weight_w_c(m)
 
         if exp_csv_rows is not None:
             exp_csv_rows.append(
@@ -164,16 +206,36 @@ def plot_landmark_overlay(
                     set_id,
                     k,
                     m,
-                    le,
+                    le_m,
                     fy_ksi=fyp,
                     a_sc=a_sc,
+                    ls=ls,
+                    w_c=w_c,
+                    j_feat_l2_mean=j2,
+                    j_feat_l1_mean=j1,
+                    n_jfeat_slots=n_jf,
+                    jfeat_contributes=n_jf > 0,
                 )
             )
 
         for slot in range(N_LANDMARK_SLOTS):
             label = str(slot + 1)
-            if le[slot] is not None:
-                d, f = le[slot]
+            if le_m[slot] is not None and ls[slot] is not None:
+                d_e, f_e = le_m[slot]
+                d_s, f_s = ls[slot]
+                if all(np.isfinite(x) for x in (d_e, f_e, d_s, f_s)):
+                    ax.plot(
+                        [d_e / L_yf, d_s / L_yf],
+                        [f_e / fyA, f_s / fyA],
+                        color=color,
+                        linestyle="-",
+                        linewidth=0.65,
+                        alpha=0.55,
+                        zorder=5,
+                        solid_capstyle="round",
+                    )
+            if le_m[slot] is not None:
+                d, f = le_m[slot]
                 ax.scatter(
                     [d / L_yf],
                     [f / fyA],
@@ -280,7 +342,7 @@ def main() -> None:
     p.add_argument(
         "--no-landmark-csv",
         action="store_true",
-        help="Do not write experimental landmark CSV next to each PNG.",
+        help="Do not write landmark CSV (exp + sim columns) next to each PNG.",
     )
     p.add_argument(
         "--sim-cache",

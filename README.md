@@ -57,7 +57,7 @@ pip install -r requirements.txt
 
 ## System Overview
 
-Experimental CSVs under `data/raw/` are filtered, resampled, and converted into cycle metadata. Apparent hardening statistics and [`steel_seed_sets.csv`](config/calibration/steel_seed_sets.csv) define multiple `set_id` seeds. L-BFGS-B fits SteelMPF parameters per specimen, and **averaged** and **generalized** stages summarize behavior across the specimen set. Results are reported through metrics tables and overlay plots. Objective weights (`alpha_feat`, `beta_energy`) and amplitude cycle weights are read from [`calibration_loss_settings.csv`](config/calibration/calibration_loss_settings.csv) unless overridden on the CLI.
+Experimental CSVs under `data/raw/` are filtered, resampled, and converted into cycle metadata. Apparent hardening statistics and [`steel_seed_sets.csv`](config/calibration/steel_seed_sets.csv) define multiple `set_id` seeds. L-BFGS-B fits SteelMPF parameters per specimen, and **averaged** and **generalized** stages summarize behavior across the specimen set. Results are reported through metrics tables and overlay plots. Objective weights (`w_feat_l2`, `w_feat_l1`, `w_energy_l2`, `w_energy_l1`, `w_unordered_binenv_l2`, `w_unordered_binenv_l1`) and amplitude cycle weights are read from [`calibration_loss_settings.csv`](config/calibration/calibration_loss_settings.csv) unless overridden on the CLI.
 
 ```mermaid
 flowchart LR
@@ -170,7 +170,8 @@ BRB-Calibration/
 | `config/calibration/BRB-Specimens.csv` | Geometry, layout flags, `individual_optimize`, `averaged_weight`, `generalized_weight`, … |
 | `config/calibration/steel_seed_sets.csv` | One row per `set_id`: steel columns + `b_p` / `b_n` as numbers or **median** / **mean** / **q1** / **q3** / **min** / **max** from apparent-$b$ stats |
 | `config/calibration/params_limits.csv` | Optional finite bounds per parameter (`parameter`, `lower`, `upper`); omitted parameters are unbounded |
-| `config/calibration/calibration_loss_settings.csv` | Transposed `setting,value` rows (or legacy wide row): `w_feat_l2`, `w_energy_l2`, optional L1/other weights, `use_amplitude_weights`, `amplitude_weight_power` / `amplitude_weight_eps`; legacy `alpha_feat` / `beta_energy` still accepted |
+| `config/calibration/set_id_optimize_params.csv` | Optional `set_id` → `optimize_params` list (overrides `PARAMS_TO_OPTIMIZE` per set for individual / generalized / averaged eval); omit file or row to use `params_to_optimize.py` defaults |
+| `config/calibration/calibration_loss_settings.csv` | Transposed `setting,value` rows (or wide one-row): required `w_feat_l2`, `w_energy_l2`, `use_amplitude_weights`; optional `w_feat_l1`, `w_energy_l1`, `w_unordered_binenv_l2`, `w_unordered_binenv_l1`, `amplitude_weight_power`, `amplitude_weight_eps` |
 
 ---
 
@@ -249,7 +250,7 @@ $$R = R_0\left(1 - c_{R1}\,\frac{\varepsilon_r}{c_{R2} + \varepsilon_r}\right)$$
 
 ### Parameters chosen for optimization
 
-With $f_{yp}$, $f_{yn}$, $E$, and apparent-$b$ seeds for $b_p$, $b_n$ fixed from data and seeds, the **remaining** SteelMPF degrees of freedom targeted by L-BFGS-B are the **Bauschinger / curvature** set $(R_0, c_{R1}, c_{R2})$ and the **isotropic** pair $(a_1, a_3)$ (with $a_2 = a_4 = 1$). The active list is **`PARAMS_TO_OPTIMIZE`** in [`scripts/calibrate/params_to_optimize.py`](scripts/calibrate/params_to_optimize.py) (edit there to include e.g. $b_p$, $b_n$ or yields if needed).
+With $f_{yp}$, $f_{yn}$, $E$, and apparent-$b$ seeds for $b_p$, $b_n$ fixed from data and seeds, the **remaining** SteelMPF degrees of freedom targeted by L-BFGS-B are the **Bauschinger / curvature** set $(R_0, c_{R1}, c_{R2})$ and the **isotropic** pair $(a_1, a_3)$ (with $a_2 = a_4 = 1$). The default active list is **`PARAMS_TO_OPTIMIZE`** in [`scripts/calibrate/params_to_optimize.py`](scripts/calibrate/params_to_optimize.py). Optional per-`set_id` overrides live in [`set_id_optimize_params.csv`](config/calibration/set_id_optimize_params.csv) (same allowlist; include $b_p$, $b_n$ there to optimize them using the numeric values already in `initial_brb_parameters.csv`).
 
 ---
 
@@ -257,7 +258,7 @@ With $f_{yp}$, $f_{yn}$, $E$, and apparent-$b$ seeds for $b_p$, $b_n$ fixed from
 
 ### Identification Objective
 
-The optimizer minimizes $J = \alpha_{\mathrm{feat}} J_{\mathrm{feat}} + \beta J_E$ subject to the model following the fixed resampled displacement sequence $\{u_i\}$.
+The optimizer minimizes $J_{\mathrm{total}}$, the weighted sum of raw **J_feat** (L2/L1), **J_E** (L2/L1), and **J_binenv** (L2/L1) from [`calibration_loss_settings.csv`](config/calibration/calibration_loss_settings.csv), subject to the model following the fixed resampled displacement sequence $\{u_i\}$.
 
 **Simulation.** `scripts/model/corotruss.py` (`run_simulation`): two-node corotational truss, SteelMPF, $\hat{E} = Q E$.
 
@@ -269,9 +270,9 @@ $$S_D = \max_i u_i - \min_i u_i,\qquad S_F = \max_i F^{\mathrm{exp}}_i - \min_i 
 
 $$S_E = S_F\, S_D$$
 
-is used (see `energy_scale_s_e` in [`amplitude_mse_partition.py`](scripts/calibrate/amplitude_mse_partition.py)). **NMSE** and **envelope** diagnostics in the metrics CSV are separate from $J$ and are documented in [`optimize_brb_mse.py`](scripts/calibrate/optimize_brb_mse.py). For digitized unordered evaluations (and path-ordered rows that still emit cloud diagnostics), the metrics CSVs include **`initial_unordered_J_binenv`** / **`final_unordered_J_binenv`** and the L1 companion columns **`initial_unordered_J_binenv_l1`** / **`final_unordered_J_binenv_l1`** (see [`digitized_unordered_eval_lib.py`](scripts/calibrate/digitized_unordered_eval_lib.py)). **$J_{\mathrm{binenv}}$** uses deformation bins: in each bin let $F^{\mathrm{up}}=\max F$ and $F^{\mathrm{lo}}=\min F$ separately for experiment and simulation; the bin error is $\tfrac12\bigl[((F^{\mathrm{up}}_{\mathrm{exp}}-F^{\mathrm{up}}_{\mathrm{num}})/S_F)^2+((F^{\mathrm{lo}}_{\mathrm{exp}}-F^{\mathrm{lo}}_{\mathrm{num}})/S_F)^2\bigr]$, and **$J_{\mathrm{binenv}}$** is the mean over bins where both clouds have at least one point. **$J_{\mathrm{binenv,L1}}$** uses the same bins with an L1 upper/lower gap per bin. It is unrelated to the path-ordered **EnvelopeErrorNorm** in [`amplitude_mse_partition.py`](scripts/calibrate/amplitude_mse_partition.py), which uses cycle-wise max/min along the resampled path. Proximity figures may still show one-sided nearest-neighbor links in display space for visualization only; those distances are **not** written as optimization metrics. Normalization uses $S_D=\max u-\min u$ and $S_F=\max F^{\mathrm{exp}}-\min F^{\mathrm{exp}}$ on the experimental cloud. None of these cloud terms are added into $J_{\mathrm{total}}$.
+is used (see `energy_scale_s_e` in [`amplitude_mse_partition.py`](scripts/calibrate/amplitude_mse_partition.py)). Metrics CSVs store raw **J_feat**, **J_E**, and **J_binenv** (each L2/L1) plus **`J_total`**. **`initial_unordered_J_binenv`** / **`final_unordered_J_binenv`** and the L1 companions (see [`digitized_unordered_eval_lib.py`](scripts/calibrate/digitized_unordered_eval_lib.py)) implement **$J_{\mathrm{binenv}}$**: deformation bins; in each bin $F^{\mathrm{up}}=\max F$ and $F^{\mathrm{lo}}=\min F$ separately for experiment and simulation; the bin L2 error is $\tfrac12\bigl[((F^{\mathrm{up}}_{\mathrm{exp}}-F^{\mathrm{up}}_{\mathrm{num}})/S_F)^2+((F^{\mathrm{lo}}_{\mathrm{exp}}-F^{\mathrm{lo}}_{\mathrm{num}})/S_F)^2\bigr]$; **$J_{\mathrm{binenv}}$** is the mean over bins where both clouds have at least one point. **$J_{\mathrm{binenv,L1}}$** uses the same bins with an L1 upper/lower gap per bin. Proximity figures may still show one-sided nearest-neighbor links for visualization only; those distances are **not** written as metrics. Normalization uses $S_D=\max u-\min u$ and $S_F=\max F^{\mathrm{exp}}-\min F^{\mathrm{exp}}$ on the experimental series (or cloud for digitized unordered). Only terms with nonzero weights in the loss CSV contribute to **$J_{\mathrm{total}}$**.
 
-**Weight cycles.** The resampled record is split into **weight cycles** using sorted **zero-deformation** indices in the cycle JSON (`zero_def`): each cycle is an index span used for both losses. If there are no `zero_def` points, the whole record is one cycle. Amplitude $A_c$ per cycle drives **cycle weights** $w_c = (A_c/A_{\max})^p + \varepsilon$ when `USE_AMPLITUDE_WEIGHTS` is true (`optimize_brb_mse.py`); otherwise $w_c = 1$.
+**Weight cycles.** The resampled record is split into **weight cycles** using sorted **zero-deformation** indices in the cycle JSON (`zero_def`): each cycle is an index span used for both losses. If there are no `zero_def` points, the whole record is one cycle. Amplitude $A_c$ per cycle drives **cycle weights** $w_c = (A_c/A_{\max})^p + \varepsilon$ when `use_amplitude_weights` is true in [`calibration_loss_settings.csv`](config/calibration/calibration_loss_settings.csv) (overridable with `--amplitude-weights` / `--no-amplitude-weights` on the optimize/eval CLIs); otherwise $w_c = 1$.
 
 **Landmark loss $J_{\mathrm{feat}}$.** For each weight cycle $c$, the code builds up to **twelve** experimental landmarks on $(u,F^{\mathrm{exp}})$: first tension/compression yield using $F^{\mathrm{exp}} > f_y A_{\mathrm{sc}}$ and $F^{\mathrm{exp}} < -f_y A_{\mathrm{sc}}$ (no 1.1 factor), global max/min force, $F$ at $u=0$ on each yield-to-peak subpath (interpolated), two mid-$u$ points per side between yield, $u=0$, and peak, then $u$ at $F=0$ unloading after each peak (see [`cycle_feature_loss.py`](scripts/calibrate/cycle_feature_loss.py)). For **slots 1–10**, the simulation is compared at the **same experimental $u$** using squared normalized **force** error $(F^{\mathrm{sim}}-F^{\mathrm{exp}})^2/S_F^{\,2}$. For **slots 11–12**, squared normalized **displacement** error $(u^{\mathrm{sim}}-u^{\mathrm{exp}})^2/S_D^{\,2}$ at those unloadings. Averaging omits slots where either side is missing.
 
@@ -293,9 +294,9 @@ where $N_{\mathrm{cyc}}$ is the number of weight cycles. **Amplitude weights $w_
 
 **Role of $J_E$.** The primary motivation is to **match dissipated energy** cycle by cycle: hysteretic energy loss strongly affects **transient** response (damping-equivalent behavior, cumulative plastic work), so calibrating only on force–deformation landmarks can under-constrain energy unless a dedicated term is added. **Implementation detail:** $J_E$ uses **one scalar per weight cycle** (the trapezoidal $|\int F\,\mathrm{d}u|$), averaged **uniformly over cycles** without $w_c$, so the energy term is **not** inflated by whichever half-cycles happen to contain more resampled points—avoiding a sampling-density artifact that a naive pointwise sum would create. (Across specimens, averaged and generalized stages use separate **specimen** weights in `specimen_weights.py`; within one specimen, $J_E$ is uniform over cycles.)
 
-**Combined objective.** $J = \alpha_{\mathrm{feat}} J_{\mathrm{feat}} + \beta J_E$ with `ALPHA_FEAT` and `BETA_ENERGY` in `optimize_brb_mse.py`. If $\beta = 0$, $J_E$ is still computed for metrics/logging when simulation succeeds.
+**Combined objective.** $J_{\mathrm{total}} = \sum_k w_k \, m_k$ for raw metrics $m_k \in \{\texttt{J\_feat}^{L2/L1}, \texttt{J\_E}^{L2/L1}, \texttt{J\_binenv}^{L2/L1}\}$ and matching weights $w_k$ in [`calibration_loss_settings.csv`](config/calibration/calibration_loss_settings.csv). Raw **J_E** is still computed for reporting when simulation succeeds even if its weights are zero.
 
-**Optimizer.** L-BFGS-B (`scipy.optimize.minimize`); failed simulations receive a large penalty (`FAILURE_PENALTY`). Objective weights: `ALPHA_FEAT`, `BETA_ENERGY` in `optimize_brb_mse.py`.
+**Optimizer.** L-BFGS-B (`scipy.optimize.minimize`); failed simulations receive a large penalty (`FAILURE_PENALTY`). Weights are read from the loss CSV (or defaults in `calibration_loss_settings.py`).
 
 **Code map.**
 
@@ -304,6 +305,7 @@ where $N_{\mathrm{cyc}}$ is the number of weight cycles. **Amplitude weights $w_
 | Cycle partition and $w_c$ | `build_cycle_weight_ranges` / `build_amplitude_weights` — `amplitude_mse_partition.py` |
 | $J_{\mathrm{feat}}$ | `feature_mse_cycles` — `cycle_feature_loss.py` |
 | $J_E$ | `energy_mse_cycles` — `amplitude_mse_partition.py` |
+| $J_{\mathrm{binenv}}$ | `compute_unordered_binenv_metrics` — `digitized_unordered_eval_lib.py` |
 
 ### Parameter Seeding and Initialization
 
@@ -335,7 +337,7 @@ Each row of **`steel_seed_sets.csv`** defines one **`set_id`**. Running the full
 
 ### Parameter Summary Reports
 
-[`report_calibration_param_tables.py`](scripts/calibrate/report_calibration_param_tables.py) writes Markdown + CSV summaries under **`summary_statistics/`** (e.g. `--write summary_statistics/calibration_parameter_summary.md`). The Markdown **generalized** section states the **best `set_id`** (lowest specimen-weighted mean `final_J_total` over contributing rows) and extends the per-`set_id` table with weighted-mean eval columns from `generalized_params_eval_metrics.csv` (`J_feat`, `J_E`, `J_total`, `nmse_F`, `env`, `J_binenv`, `J_binenv_L1`). The companion files are:
+[`report_calibration_param_tables.py`](scripts/calibrate/report_calibration_param_tables.py) writes Markdown + CSV summaries under **`summary_statistics/`** (e.g. `--write summary_statistics/calibration_parameter_summary.md`). The Markdown **generalized** section states the **best `set_id`** (lowest specimen-weighted mean `final_J_total` over contributing rows) and extends the per-`set_id` table with weighted-mean eval columns from `generalized_params_eval_metrics.csv` (`J_feat`, `J_feat_L1`, `J_E`, `J_E_L1`, `J_total`, `J_binenv`, `J_binenv_L1`). The companion files are:
 
 - **`summary_statistics/calibration_parameter_summary_generalized.csv`** — includes `optimum_value` for shared optimized parameters (values at the best `set_id` for the specimen set from `generalized_params_eval_metrics.csv`); **`b_p` / `b_n`** are left blank there because they are not a single merged value per `set_id` with the default `PARAMS_TO_OPTIMIZE`. Rows list the same parameters in **SteelMPF order** (`b_p`, `b_n`, then `PARAMS_TO_OPTIMIZE`, `a2`, `a4`; see `scripts/calibrate/params_to_optimize.py`: `PARAMS_IN_SUMMARY_TABLES`).
 - **`summary_statistics/calibration_parameter_summary_individual.csv`** — adds `mean_optima` and `mean_optima_weighted` (inverse-loss–weighted mean using `1/(final_J_total+eps)` at each specimen's best set; `--weighted-optima-eps`). Same parameter columns as the generalized summary CSV.
@@ -537,18 +539,16 @@ Figures are 300 DPI unless noted in script constants.
 
 ## Optimizer Settings
 
-Settings in [`optimize_brb_mse.py`](scripts/calibrate/optimize_brb_mse.py):
+Settings in [`optimize_brb_mse.py`](scripts/calibrate/optimize_brb_mse.py) and [`calibration_loss_settings.csv`](config/calibration/calibration_loss_settings.csv):
 
 | Setting | Role |
 |---------|------|
 | `PARAMS_TO_OPTIMIZE` | Components of $\theta$ updated by L-BFGS-B; others read from CSV |
 | `params_limits.csv` | Columns `parameter`, `lower`, `upper`; finite `L,U` with `U>L` → reparameterized to $z \in [0,1]$; omit for unbounded. Override with `--param-limits` |
-| `USE_AMPLITUDE_WEIGHTS` | If `false`, $w_c = 1$ |
-| `AMPLITUDE_WEIGHT_POWER` | $p$ in $w_c = (A_c/A_{\max})^p + \varepsilon$ |
-| `AMPLITUDE_WEIGHT_EPS` | Floor $\varepsilon$ |
-| `DEBUG_PARTITION` | Assert disjoint cycle partition |
-| `ALPHA_FEAT` | $\alpha_{\mathrm{feat}}$ on $J_{\mathrm{feat}}$ |
-| `BETA_ENERGY` | $\beta$ on $J_E$ (0 drops energy from objective) |
+| `use_amplitude_weights` (loss CSV) | If `false`, cycle weights $w_c = 1$ for $J_{\mathrm{feat}}$ |
+| `amplitude_weight_power` / `amplitude_weight_eps` | $p$ and $\varepsilon$ in $w_c = (A_c/A_{\max})^p + \varepsilon$ |
+| `DEBUG_PARTITION` | In code: assert disjoint cycle partition |
+| `w_feat_l2`, `w_feat_l1`, … | Weights on raw **J_feat** / **J_E** / **J_binenv** (see loss CSV) |
 | `FAILURE_PENALTY` | Large penalty assigned to failed simulations |
 
 **Reparameterization:** finite bounds with `upper > lower` optimize in $z \in [0,1]$ with $p = L + (U-L)z$. Seeds outside the box are clipped with a warning. See `scripts/calibrate/lbfgsb_reparam.py`.

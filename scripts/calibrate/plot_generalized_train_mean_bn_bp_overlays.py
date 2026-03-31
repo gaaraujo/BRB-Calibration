@@ -239,7 +239,7 @@ def main() -> None:
         one_set["b_n"] = bn_bar
         print(
             f"set {set_id}: train-weighted mean b_p={bp_bar:.6g}, b_n={bn_bar:.6g} "
-            f"({len(one_set)} specimen rows) → sim + overlay"
+            f"({len(one_set)} specimen rows) -> sim + overlay"
         )
 
         for name in sorted(one_set["Name"].astype(str).unique()):

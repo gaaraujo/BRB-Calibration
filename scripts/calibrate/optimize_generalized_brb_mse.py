@@ -1,5 +1,10 @@
 """
-Generalized optimization of shared PARAMS_TO_OPTIMIZE across specimens (per set_id or global).
+Generalized optimization of shared steel parameters across specimens (per set_id or global).
+
+Default optimized columns come from ``params_to_optimize.PARAMS_TO_OPTIMIZE``. Optional
+``config/calibration/set_id_optimize_params.csv`` overrides the list per ``set_id`` (see
+``set_id_optimize_params``). Pooled mode (``--no-by-set-id``) requires every training ``set_id`` to
+resolve to the same list when that CSV is present.
 
 Minimizes the weighted mean of per-row J_total (same landmark + energy loss as
 optimize_brb_mse). Specimen weights: ``generalized_weight`` on path-ordered rows (see
@@ -9,8 +14,8 @@ Initial iterate: weighted mean averaged vector from the input parameters CSV.
 After optimization, evaluates specimens that have resampled and/or digitized unordered data and writes
 metrics CSV under ``results/calibration/generalized_optimize/``, a per-``set_id`` eval rollup CSV under
 ``summary_statistics/generalized_set_id_eval_summary.csv``, plots, NPZ and CSV force histories. The **parameters** CSV lists **every** row in the
-input ``--params`` file with merged generalized ``PARAMS_TO_OPTIMIZE`` (same shared steel parameters per
-``set_id`` for the whole specimen set). Digitized unordered (``path_ordered=false``) specimens use the pipeline
+input ``--params`` file with merged generalized steel columns (same shared vector per ``set_id`` when
+``--no-by-set-id`` is not used). Digitized unordered (``path_ordered=false``) specimens use the pipeline
 resampled deformation drive when available; combined-directory overlays (no path metrics), same as
 ``eval_averaged_params``.
 """
@@ -91,11 +96,19 @@ from calibrate.calibration_paths import (  # noqa: E402
     OPTIMIZED_BRB_PARAMETERS_PATH,
     PARAM_LIMITS_CSV,
     PLOTS_GENERALIZED_OPTIMIZE,
+    SET_ID_OPTIMIZE_PARAMS_CSV,
 )
 from calibrate.pipeline_log import kv, line, run_banner, saved_artifacts, section  # noqa: E402
 from calibrate.report_generalized_set_id_eval_summary import (  # noqa: E402
     write_generalized_set_id_eval_summary,
     write_generalized_unordered_j_split_summaries,
+)
+from calibrate.set_id_optimize_params import (  # noqa: E402
+    build_param_cols_by_set_id_from_mapping,
+    load_set_id_optimize_params,
+    resolve_optimize_params_for_set_id,
+    union_param_cols,
+    unique_weighted_train_set_ids,
 )
 from calibrate.specimen_weights import (  # noqa: E402
     catalog_metrics_fields,
@@ -218,7 +231,6 @@ def _generalized_objective_value(
         except Exception:
             return float(FAILURE_PENALTY)
         prow = inst.prow
-        l_y = float(prow["L_y"]) if "L_y" in prow.index and pd.notna(prow.get("L_y")) else float("nan")
         bd = simulate_and_loss_breakdown(
             inst.D_exp,
             inst.F_exp,
@@ -226,10 +238,10 @@ def _generalized_objective_value(
             inst.amp_meta,
             s_d=inst.s_d,
             loss=loss,
-            l_y=l_y,
             fy_ksi=float(prow["fyp"]),
             a_sc=float(prow["A_sc"]),
             L_T=float(prow["L_T"]),
+            L_y=float(prow["L_y"]),
             A_t=float(prow["A_t"]),
             E_ksi=float(prow["E"]),
             exp_landmark_cache=exp_landmark_cache,
@@ -295,8 +307,9 @@ def main() -> None:
     """CLI entry point."""
     p = argparse.ArgumentParser(
         description=(
-            "Generalized L-BFGS-B on shared PARAMS_TO_OPTIMIZE: weighted mean J_total over "
-            "specimens with positive weight; then full specimen-set evaluation."
+            "Generalized L-BFGS-B on shared steel parameters (default PARAMS_TO_OPTIMIZE; optional "
+            "per-set_id CSV): weighted mean J_total over specimens with positive weight; then full "
+            "specimen-set evaluation."
         ),
     )
     p.add_argument(
@@ -364,8 +377,9 @@ def main() -> None:
         type=Path,
         default=None,
         help=(
-            "CSV with w_feat_l2, w_energy_l2, optional L1/other weights, use_amplitude_weights, "
-            f"and optional amplitude_weight_power / amplitude_weight_eps. Default: {_ls_rel}."
+            "CSV: required w_feat_l2, w_energy_l2, use_amplitude_weights; optional w_feat_l1, "
+            "w_energy_l1, w_unordered_binenv_l2/l1, amplitude_weight_power / amplitude_weight_eps. "
+            f"Default: {_ls_rel}."
         ),
     )
     p.add_argument(
@@ -373,6 +387,20 @@ def main() -> None:
         action=argparse.BooleanOptionalAction,
         default=None,
         help=AMPLITUDE_WEIGHTS_ARG_HELP,
+    )
+    _so_rel = SET_ID_OPTIMIZE_PARAMS_CSV
+    try:
+        _so_rel = SET_ID_OPTIMIZE_PARAMS_CSV.relative_to(_PROJECT_ROOT)
+    except ValueError:
+        pass
+    p.add_argument(
+        "--set-id-optimize-params",
+        type=Path,
+        default=None,
+        help=(
+            "Optional CSV: set_id, optimize_params (overrides PARAMS_TO_OPTIMIZE per set_id). "
+            f"Default: {_so_rel}."
+        ),
     )
     args = p.parse_args()
 
@@ -447,32 +475,83 @@ def main() -> None:
     if not train_all:
         raise SystemExit("No training instances with positive specimen weight.")
 
-    init_pool = compute_weighted_averaged_param_dict(
-        params_df,
-        list(PARAMS_TO_OPTIMIZE),
-        by_set_id=by_set_id,
-        weight_fn=pooled_w_fn,
+    default_list = list(PARAMS_TO_OPTIMIZE)
+    opt_csv = (
+        Path(args.set_id_optimize_params).expanduser().resolve()
+        if args.set_id_optimize_params
+        else SET_ID_OPTIMIZE_PARAMS_CSV
+    )
+    opt_map = load_set_id_optimize_params(opt_csv)
+    if opt_map:
+        line(f"set_id optimize params CSV: {opt_csv}")
+    else:
+        line(
+            "set_id optimize params: (none) — using PARAMS_TO_OPTIMIZE; "
+            f"optional {SET_ID_OPTIMIZE_PARAMS_CSV}"
+        )
+
+    pool_set_ids = unique_weighted_train_set_ids(params_df, pooled_w_fn)
+    bounds_cache: dict[tuple[str, ...], dict[str, tuple[float, float]]] = {}
+
+    def _bounds_for_active(active: list[str]) -> dict[str, tuple[float, float]]:
+        key = tuple(active)
+        if key not in bounds_cache:
+            bounds_cache[key] = bounds_dict_for(list(active), limits_path=args.param_limits)
+        return bounds_cache[key]
+
+    lim_path = Path(args.param_limits).expanduser().resolve() if args.param_limits else PARAM_LIMITS_CSV
+    line(f"parameter limits: {lim_path}")
+
+    global_active = (
+        assert_global_optimize_params_consistent(
+            opt_map, [inst.set_id for inst in train_all], default_list
+        )
+        if (not by_set_id and opt_map)
+        else default_list
     )
 
-    bounds_dict = bounds_dict_for(list(PARAMS_TO_OPTIMIZE), limits_path=args.param_limits)
-    line(f"parameter limits: {Path(args.param_limits).expanduser().resolve() if args.param_limits else PARAM_LIMITS_CSV}")
+    if by_set_id:
+        param_cols_by_set_id = (
+            build_param_cols_by_set_id_from_mapping(opt_map, default_list, set_ids=pool_set_ids)
+            if opt_map
+            else None
+        )
+        pool_param_cols = union_param_cols(default_list, param_cols_by_set_id)
+        init_pool = compute_weighted_averaged_param_dict(
+            params_df,
+            pool_param_cols,
+            by_set_id=True,
+            weight_fn=pooled_w_fn,
+            param_cols_by_set_id=param_cols_by_set_id,
+        )
+    else:
+        init_pool = compute_weighted_averaged_param_dict(
+            params_df,
+            global_active,
+            by_set_id=False,
+            weight_fn=pooled_w_fn,
+        )
 
     generalized_pool: dict[Any, pd.Series] = {}
 
     section("Joint optimization (L-BFGS-B)")
     if by_set_id:
-        by_sid: dict[Any, list[GeneralizedInstance]] = {}
+        by_sid: dict[int, list[GeneralizedInstance]] = {}
         for inst in train_all:
-            by_sid.setdefault(inst.set_id, []).append(inst)
+            sid_k = int(pd.to_numeric(inst.set_id, errors="raise"))
+            by_sid.setdefault(sid_k, []).append(inst)
         for sid_key, tr in by_sid.items():
+            active = resolve_optimize_params_for_set_id(opt_map, sid_key, default_list)
             init_vec = get_averaged_for_set_id(init_pool, sid_key, by_set_id=True)
-            line(f"set_id={sid_key}  ({len(tr)} training rows, init averaged)...")
+            line(
+                f"set_id={sid_key}  ({len(tr)} training rows, init averaged)  optimize: {active}..."
+            )
             opt_vec, res = _optimize_one_generalized_group(
                 tr,
                 params_df,
                 init_vec,
-                list(PARAMS_TO_OPTIMIZE),
-                bounds_dict,
+                active,
+                _bounds_for_active(active),
                 loss=loss,
             )
             generalized_pool[sid_key] = opt_vec
@@ -481,13 +560,16 @@ def main() -> None:
             )
     else:
         init_vec = get_averaged_for_set_id(init_pool, "_global", by_set_id=False)
-        line(f"global pool  ({len(train_all)} training rows, init averaged)...")
+        line(
+            f"global pool  ({len(train_all)} training rows, init averaged)  "
+            f"optimize: {global_active}..."
+        )
         opt_vec, res = _optimize_one_generalized_group(
             train_all,
             params_df,
             init_vec,
-            list(PARAMS_TO_OPTIMIZE),
-            bounds_dict,
+            global_active,
+            _bounds_for_active(global_active),
             loss=loss,
         )
         generalized_pool["_global"] = opt_vec
@@ -530,16 +612,12 @@ def main() -> None:
             line(f"skip {sid} set {set_id}: {e}")
             continue
 
-        eval_row_init = merge_averaged_into_row(prow, init_shared, list(PARAMS_TO_OPTIMIZE))
-        eval_row = merge_averaged_into_row(prow, shared, list(PARAMS_TO_OPTIMIZE))
+        active = resolve_optimize_params_for_set_id(opt_map, set_id, default_list)
+        eval_row_init = merge_averaged_into_row(prow, init_shared, active)
+        eval_row = merge_averaged_into_row(prow, shared, active)
         s_f_ref = force_scale_s_f(F_exp)
         s_e_ref = energy_scale_s_e(D_exp, F_exp)
         n_cycles = len(amp_meta)
-        n_cycles_envelope = sum(
-            1
-            for m in amp_meta
-            if not m.get("incomplete", False) and int(m["end"]) > int(m["start"])
-        )
 
         exp_landmark_cache_eval: dict = {}
         try:
@@ -555,11 +633,6 @@ def main() -> None:
             line(f"{sid} set {set_id}: length mismatch initial sim vs exp")
             continue
 
-        l_y_init = (
-            float(eval_row_init["L_y"])
-            if "L_y" in eval_row_init.index and pd.notna(eval_row_init.get("L_y"))
-            else float("nan")
-        )
         bd_init = simulate_and_loss_breakdown(
             D_exp,
             F_exp,
@@ -567,10 +640,10 @@ def main() -> None:
             amp_meta,
             s_d=inst.s_d,
             loss=loss,
-            l_y=l_y_init,
             fy_ksi=float(eval_row_init["fyp"]),
             a_sc=float(eval_row_init["A_sc"]),
             L_T=float(eval_row_init["L_T"]),
+            L_y=float(eval_row_init["L_y"]),
             A_t=float(eval_row_init["A_t"]),
             E_ksi=float(eval_row_init["E"]),
             exp_landmark_cache=exp_landmark_cache_eval,
@@ -592,7 +665,6 @@ def main() -> None:
             line(f"{sid} set {set_id}: length mismatch sim vs exp")
             continue
 
-        l_y_ev = float(eval_row["L_y"]) if "L_y" in eval_row.index and pd.notna(eval_row.get("L_y")) else float("nan")
         bd = simulate_and_loss_breakdown(
             D_exp,
             F_exp,
@@ -600,10 +672,10 @@ def main() -> None:
             amp_meta,
             s_d=inst.s_d,
             loss=loss,
-            l_y=l_y_ev,
             fy_ksi=float(eval_row["fyp"]),
             a_sc=float(eval_row["A_sc"]),
             L_T=float(eval_row["L_T"]),
+            L_y=float(eval_row["L_y"]),
             A_t=float(eval_row["A_t"]),
             E_ksi=float(eval_row["E"]),
             exp_landmark_cache=exp_landmark_cache_eval,
@@ -695,7 +767,6 @@ def main() -> None:
                 "aggregate_by_set_id": by_set_id,
                 **mi,
                 **mf,
-                "n_cycles_envelope": n_cycles_envelope,
                 **_loss_weight_snapshot(loss),
                 "S_F": s_f_ref,
                 "S_D": inst.s_d,
@@ -706,8 +777,7 @@ def main() -> None:
             }
         )
         line(
-            f"{sid} set {set_id}: J={jtot:.6g}  NMSE_L2={bd.nmse_l2:.6g}  "
-            f"env_L2={bd.env_l2:.6g}  J_binenv={cloud_final.J_binenv:.6g}"
+            f"{sid} set {set_id}: J={jtot:.6g}  J_binenv={cloud_final.J_binenv:.6g}"
         )
 
     section("Generalized evaluation -- digitized unordered")
@@ -745,20 +815,21 @@ def main() -> None:
         for _, prow in prow_block.iterrows():
             set_id = prow.get("set_id", "?")
             contributes = specimen_w > 0.0
+            active = resolve_optimize_params_for_set_id(opt_map, set_id, default_list)
             try:
                 shared = get_averaged_for_set_id(generalized_pool, set_id, by_set_id=by_set_id)
             except KeyError as e:
                 line(f"skip {sid} set {set_id}: {e}")
                 continue
 
-            eval_row = merge_averaged_into_row(prow, shared, list(PARAMS_TO_OPTIMIZE))
-            sim_row = eval_row_with_envelope_bn_from_unordered(eval_row, cat_row, u_c, F_c)
             try:
                 init_shared = get_averaged_for_set_id(init_pool, set_id, by_set_id=by_set_id)
             except KeyError as e:
                 line(f"skip {sid} set {set_id}: missing initial seed {e}")
                 continue
-            eval_row_init = merge_averaged_into_row(prow, init_shared, list(PARAMS_TO_OPTIMIZE))
+            eval_row = merge_averaged_into_row(prow, shared, active)
+            sim_row = eval_row_with_envelope_bn_from_unordered(eval_row, cat_row, u_c, F_c)
+            eval_row_init = merge_averaged_into_row(prow, init_shared, active)
             sim_row_init = eval_row_with_envelope_bn_from_unordered(eval_row_init, cat_row, u_c, F_c)
 
             try:
@@ -868,7 +939,6 @@ def main() -> None:
                 "final_unordered_J_binenv": cloud_final.J_binenv,
                 "initial_unordered_J_binenv_l1": cloud_init.J_binenv_l1,
                 "final_unordered_J_binenv_l1": cloud_final.J_binenv_l1,
-                "n_cycles_envelope": 0,
                 **_loss_weight_snapshot(loss),
                 "S_F": s_f_cloud,
                 "S_D": s_d_ref,
@@ -887,8 +957,9 @@ def main() -> None:
     for _, prow in params_df.iterrows():
         set_id = prow.get("set_id", "?")
         shared = get_averaged_for_set_id(generalized_pool, set_id, by_set_id=by_set_id)
+        active_out = resolve_optimize_params_for_set_id(opt_map, set_id, default_list)
         specimen_set_param_rows.append(
-            merge_averaged_into_row(prow, shared, list(PARAMS_TO_OPTIMIZE)).to_dict()
+            merge_averaged_into_row(prow, shared, active_out).to_dict()
         )
     p_df = pd.DataFrame(specimen_set_param_rows)
     p_df = p_df[params_df.columns.tolist()]

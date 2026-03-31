@@ -1,0 +1,8 @@
+# Per-set_id columns optimized by L-BFGS-B (optimize_brb_mse, optimize_generalized_brb_mse, eval_averaged_params).
+# If this file is missing or a set_id has no row, PARAMS_TO_OPTIMIZE in scripts/calibrate/params_to_optimize.py is used.
+# optimize_params: comma-separated segments. Each segment is lowercased and spaces/underscores removed
+# as a whole (e.g. "c r 1" -> cR1), or split on whitespace if needed (e.g. "R0 cR1" in one cell).
+# Listing b_p / b_n uses values already written to initial_brb_parameters.csv (steel_seed_sets.csv + apparent-b stats).
+set_id,optimize_params
+1,"cR1,cR2,a1,a3"
+2,"cR1,cR2,a1,a3"

@@ -43,7 +43,7 @@ DEFAULT_BINENV_N_BINS = 32
 
 @dataclass(frozen=True)
 class UnorderedCloudMetricsResult:
-    """One-sided NN (numerical→experimental) + binned upper/lower envelope diagnostic in (D,F) space."""
+    """One-sided NN (numerical→experimental) + binned max/min force bands in (D,F) space."""
 
     J_nearest: float
     J_binenv: float
@@ -110,7 +110,7 @@ def compute_unordered_binenv_metrics(
     n_binenv_bins: int = DEFAULT_BINENV_N_BINS,
 ) -> tuple[float, float]:
     """
-    Binned envelope mismatch only (no nearest-neighbor / O(N²) cost).
+    Binned max/min force mismatch per deformation bin (no nearest-neighbor / O(N²) cost).
 
     Returns ``(J_binenv_L2, J_binenv_L1)`` with the same bins as the cloud diagnostic.
     """
@@ -130,16 +130,16 @@ def compute_unordered_binenv_metrics(
     if not np.isfinite(s_d) or not np.isfinite(s_f) or abs(s_d) <= scale_eps or abs(s_f) <= scale_eps:
         return float("nan"), float("nan")
 
-    j_binenv = _compute_binned_envelope_error(
+    j_binenv = _compute_binned_binenv_l2(
         exp_xy_raw, num_xy_raw, s_f, n_bins=n_binenv_bins, scale_eps=scale_eps
     )
-    j_binenv_l1 = _compute_binned_envelope_error_l1(
+    j_binenv_l1 = _compute_binned_binenv_l1(
         exp_xy_raw, num_xy_raw, s_f, n_bins=n_binenv_bins, scale_eps=scale_eps
     )
     return float(j_binenv), float(j_binenv_l1)
 
 
-def _compute_binned_envelope_error(
+def _compute_binned_binenv_l2(
     exp_xy_raw: np.ndarray,
     num_xy_raw: np.ndarray,
     s_f: float,
@@ -199,7 +199,7 @@ def _compute_binned_envelope_error(
     return float(np.mean(errs))
 
 
-def _compute_binned_envelope_error_l1(
+def _compute_binned_binenv_l1(
     exp_xy_raw: np.ndarray,
     num_xy_raw: np.ndarray,
     s_f: float,
@@ -207,7 +207,7 @@ def _compute_binned_envelope_error_l1(
     n_bins: int = DEFAULT_BINENV_N_BINS,
     scale_eps: float = 1e-12,
 ) -> float:
-    """L1 analogue of ``_compute_binned_envelope_error``: mean of ``(1/2)(|ΔF_up|+|ΔF_lo|)/S_F`` per bin."""
+    """L1 analogue of ``_compute_binned_binenv_l2``: mean of ``(1/2)(|ΔF_up|+|ΔF_lo|)/S_F`` per bin."""
     if exp_xy_raw.shape[0] == 0 or num_xy_raw.shape[0] == 0:
         return float("nan")
     if not np.isfinite(s_f) or abs(s_f) <= scale_eps:
@@ -265,7 +265,7 @@ def compute_unordered_cloud_metrics(
 
     **J_nearest** and **J_nearest_l1** are no longer computed (always NaN); use
     ``num_to_exp_nearest_indices`` in display space if you need proximity maps.
-    **J_binenv** / **J_binenv_l1**: binned envelope mismatch (L2 / L1 of upper/lower force gaps per bin).
+    **J_binenv** / **J_binenv_l1**: binned max/min force mismatch (L2 / L1 of upper/lower force gaps per bin).
 
     Normalization uses experimental ranges only:
     S_D = max(u_exp) - min(u_exp), S_F = max(F_exp) - min(F_exp).
@@ -318,10 +318,10 @@ def compute_unordered_cloud_metrics(
     exp_xy = np.column_stack([exp_xy_raw[:, 0] / s_d, exp_xy_raw[:, 1] / s_f])
     num_xy = np.column_stack([num_xy_raw[:, 0] / s_d, num_xy_raw[:, 1] / s_f])
 
-    j_binenv = _compute_binned_envelope_error(
+    j_binenv = _compute_binned_binenv_l2(
         exp_xy_raw, num_xy_raw, s_f, n_bins=n_binenv_bins, scale_eps=scale_eps
     )
-    j_binenv_l1 = _compute_binned_envelope_error_l1(
+    j_binenv_l1 = _compute_binned_binenv_l1(
         exp_xy_raw, num_xy_raw, s_f, n_bins=n_binenv_bins, scale_eps=scale_eps
     )
     num_to_exp_idx = np.full(num_xy_raw.shape[0], -1, dtype=int)

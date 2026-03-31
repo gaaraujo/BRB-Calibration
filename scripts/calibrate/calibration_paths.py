@@ -18,6 +18,7 @@ BRB_SPECIMENS_CSV = CALIBRATION_CONFIG_DIR / "BRB-Specimens.csv"
 STEEL_SEED_SETS_CSV = CALIBRATION_CONFIG_DIR / "steel_seed_sets.csv"
 PARAM_LIMITS_CSV = CALIBRATION_CONFIG_DIR / "params_limits.csv"
 CALIBRATION_LOSS_SETTINGS_CSV = CALIBRATION_CONFIG_DIR / "calibration_loss_settings.csv"
+SET_ID_OPTIMIZE_PARAMS_CSV = CALIBRATION_CONFIG_DIR / "set_id_optimize_params.csv"
 
 # Human-readable / tabular summaries (not raw inputs or per-run metrics blobs).
 SUMMARY_STATISTICS_DIR = _PROJECT_ROOT / "summary_statistics"

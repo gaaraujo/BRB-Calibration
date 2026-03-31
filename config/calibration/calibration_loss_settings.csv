@@ -1,19 +1,14 @@
-# J_total = sum_k w_k * (raw metric k). Legacy setting names alpha_feat / beta_energy map to w_feat_l2 / w_energy_l2.
+# J_total = sum_k w_k * (raw metric k). Required: w_feat_l2, w_energy_l2, use_amplitude_weights.
+# Optional: w_feat_l1, w_energy_l1, w_unordered_binenv_l2, w_unordered_binenv_l1, amplitude_weight_*.
 # use_amplitude_weights: 0/false = uniform cycle weights w_c=1 for J_feat; 1/true = amplitude-based w_c.
 # Format: two columns setting,value (one row per parameter). A single wide header row is still supported.
 setting,value
 w_feat_l2,1
 w_feat_l1,0
-w_energy_l2,4
+w_energy_l2,0
 w_energy_l1,0
-w_nmse_l2,0
-w_nmse_l1,0
-w_env_l2,0
-w_env_l1,0
 w_unordered_binenv_l2,0
 w_unordered_binenv_l1,0
-w_seg_force_l1,0
-w_seg_force_l2,0
 use_amplitude_weights,true
 amplitude_weight_power,2.0
 amplitude_weight_eps,0.05

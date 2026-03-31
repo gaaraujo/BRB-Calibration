@@ -2,8 +2,8 @@
 Write Markdown tables of ``PARAMS_IN_SUMMARY_TABLES`` (SteelMPF order: ``b_p``, ``b_n``, then ``PARAMS_TO_OPTIMIZE``, ``a2``, ``a4``)
 by calibration ``set_id`` (default 1–10; match ``steel_seed_sets.csv``).
 
-**Generalized** rows: one value per ``set_id`` for ``PARAMS_TO_OPTIMIZE`` (shared steel vector; any row per group suffices). ``b_p`` / ``b_n`` remain per-specimen in the merged CSV and are **not** part of that shared vector with the default ``PARAMS_TO_OPTIMIZE``, so their ``optimum_value`` column is left blank.
-The generalized Markdown table also appends **specimen-weighted mean** eval metrics per ``set_id`` (raw feature and energy terms, total ``J``, normalized force MSE, envelope error, nearest-point and binned-envelope terms from ``generalized_params_eval_metrics.csv``).
+**Generalized** rows: one value per ``set_id`` for the optimized parameter subset (default ``PARAMS_TO_OPTIMIZE``; optional per-``set_id`` overrides via ``set_id_optimize_params.csv``). ``b_p`` / ``b_n`` remain per-specimen in the merged CSV when they are not part of that shared vector, so their ``optimum_value`` column is left blank in that case.
+The generalized Markdown table also appends **specimen-weighted mean** eval metrics per ``set_id`` (raw ``J_feat`` / ``J_E`` / ``J_binenv`` L2 and L1, ``J_total`` from ``generalized_params_eval_metrics.csv``).
 **Individual** rows: mean across specimen rows with finite optimized parameters for that ``set_id``.
 
 With ``--write report.md``, also writes CSV summaries next to the Markdown:
@@ -22,7 +22,7 @@ The generalized CSV adds ``optimum_value``: for each **shared** optimized parame
 vector at the specimen-set-optimal ``set_id`` (among selected sets: minimum
 specimen-weighted mean ``final_J_total`` over **contributing** rows, same rule as
 ``report_averaged_vs_generalized_metrics``). ``b_p`` and ``b_n`` are omitted (blank) because they are not
-merged into a single value per ``set_id`` with the default ``PARAMS_TO_OPTIMIZE``. Requires ``generalized_params_eval_metrics.csv``
+merged into a single value per ``set_id`` with the default optimized subset (unless ``b_p`` / ``b_n`` are included there via ``set_id_optimize_params.csv``). Requires ``generalized_params_eval_metrics.csv``
 (or ``--generalized-metrics``).
 """
 from __future__ import annotations
@@ -44,15 +44,16 @@ from calibrate.calibration_paths import (  # noqa: E402
     CALIBRATION_PARAMETER_SUMMARY_MD,
     GENERALIZED_BRB_PARAMETERS_PATH,
     OPTIMIZED_BRB_PARAMETERS_PATH,
+    STEEL_SEED_SETS_CSV,
 )
 from calibrate.params_to_optimize import PARAMS_IN_SUMMARY_TABLES  # noqa: E402
 
 GENERALIZED_PER_SET_METRICS: list[tuple[str, str]] = [
     ("final_J_feat_raw", "J_feat"),
+    ("final_J_feat_l1_raw", "J_feat_L1"),
     ("final_J_E_raw", "J_E"),
+    ("final_J_E_l1_raw", "J_E_L1"),
     ("final_J_total", "J_total"),
-    ("final_nmse_force", "nmse_F"),
-    ("final_env_error", "env"),
     ("final_unordered_J_binenv", "J_binenv"),
     ("final_unordered_J_binenv_l1", "J_binenv_L1"),
 ]
@@ -68,6 +69,21 @@ def _parse_set_ids(spec: str) -> list[int]:
             lo, hi = hi, lo
         return list(range(lo, hi + 1))
     return [int(x) for x in spec.split(",") if x]
+
+
+def _set_ids_from_steel_seed_sets(path: Path) -> list[int]:
+    """Load set_id list from steel_seed_sets.csv (skip comment lines)."""
+    if not path.is_file():
+        raise SystemExit(f"Missing steel seed sets CSV: {path}")
+    df = pd.read_csv(path, comment="#")
+    if "set_id" not in df.columns:
+        raise SystemExit(f"steel_seed_sets.csv missing 'set_id' column: {path}")
+    sid = pd.to_numeric(df["set_id"], errors="coerce")
+    sid = sid[np.isfinite(sid)]
+    out = sorted({int(x) for x in sid.to_numpy(dtype=float)})
+    if not out:
+        raise SystemExit(f"No set_id rows found in steel_seed_sets.csv: {path}")
+    return out
 
 
 def _fmt(x: float) -> str:
@@ -376,8 +392,8 @@ def build_report(
         "# Optimized SteelMPF parameters by calibration set",
         "",
         "This file summarizes **`PARAMS_IN_SUMMARY_TABLES`** (SteelMPF order: ``b_p``, ``b_n``, then optimized steel, ``a2``, ``a4``) "
-        "from the individual and generalized parameter CSVs. Values are shown for **set_id** "
-        f"{min(set_ids)}–{max(set_ids)} (requested set_id values).",
+        "from the individual and generalized parameter CSVs. Values are shown for requested **set_id** values: "
+        f"{', '.join(str(int(s)) for s in set_ids)}.",
         "",
         f"- **Generated:** {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}",
         f"- **Individual parameters CSV:** `{individual_path.as_posix()}`",
@@ -387,9 +403,11 @@ def build_report(
         "",
         "## Generalized optimize — shared vector per set",
         "",
-        "One row per **set_id**: the generalized optimizer assigns the same **`PARAMS_TO_OPTIMIZE`** values to every "
-        "specimen row for that set (table shows that shared vector). "
-        "**`b_p` / `b_n`** in the merged CSV remain per-specimen; the summary **optimum_value** for those columns is left blank.",
+        "One row per **set_id**: the generalized optimizer assigns the same shared steel-parameter values to every "
+        "specimen row for that set (default columns: **`PARAMS_TO_OPTIMIZE`**; optional per-`set_id` list in "
+        "**`set_id_optimize_params.csv`**). "
+        "**`b_p` / `b_n`** in the merged CSV remain per-specimen when not in that shared vector; the summary "
+        "**optimum_value** for those columns is then left blank.",
         "",
     ]
     if best_id is not None and np.isfinite(best_j):
@@ -409,9 +427,10 @@ def build_report(
         [
             "",
             "Trailing columns are specimen-weighted means from ``generalized_params_eval_metrics.csv``: "
-            "``J_feat`` → ``final_J_feat_raw`` (cycle feature), ``J_E`` → ``final_J_E_raw`` (energy), "
-            "``J_total`` → ``final_J_total``, ``nmse_F`` → ``final_nmse_force``, ``env`` → ``final_env_error``, "
-            "``J_binenv`` / ``J_binenv_L1`` → ``final_unordered_J_binenv`` / ``final_unordered_J_binenv_l1``.",
+            "``J_feat``/``J_feat_L1`` → ``final_J_feat_raw``/``final_J_feat_l1_raw`` (cycle feature, L2/L1), "
+            "``J_E``/``J_E_L1`` → ``final_J_E_raw``/``final_J_E_l1_raw`` (energy, L2/L1), "
+            "``J_total`` → ``final_J_total``, "
+            "``J_binenv``/``J_binenv_L1`` → ``final_unordered_J_binenv``/``final_unordered_J_binenv_l1`` (L2/L1).",
             "",
         ]
     )
@@ -446,7 +465,7 @@ def build_report(
             ov_map = {p: float("nan") for p in params}
     else:
         ov_map = {p: float("nan") for p in params}
-    # b_p / b_n stay per-specimen in generalized_brb_parameters.csv (not in PARAMS_TO_OPTIMIZE merge).
+    # b_p / b_n stay per-specimen when not part of the shared optimized subset for that set_id.
     for _p in ("b_p", "b_n"):
         if _p in ov_map:
             ov_map[_p] = float("nan")
@@ -558,8 +577,20 @@ def main() -> None:
     p.add_argument(
         "--sets",
         type=str,
-        default="1-10",
-        help='set_id list, e.g. "1-10" or "1,2,3".',
+        default=None,
+        help=(
+            "set_id list, e.g. '1-10' or '1,2,3'. "
+            "Default: all set_id values present in --steel-seeds (steel_seed_sets.csv)."
+        ),
+    )
+    p.add_argument(
+        "--steel-seeds",
+        type=Path,
+        default=STEEL_SEED_SETS_CSV,
+        help=(
+            "steel_seed_sets.csv path used to infer set_ids when --sets is omitted. "
+            f"Default: {STEEL_SEED_SETS_CSV}."
+        ),
     )
     p.add_argument(
         "--weighted-optima-eps",
@@ -611,7 +642,10 @@ def main() -> None:
     if not j_metrics.is_file():
         raise SystemExit(f"Missing generalized eval metrics CSV: {j_metrics}")
 
-    set_ids = _parse_set_ids(args.sets)
+    if args.sets:
+        set_ids = _parse_set_ids(args.sets)
+    else:
+        set_ids = _set_ids_from_steel_seed_sets(Path(args.steel_seeds).expanduser().resolve())
     params = list(PARAMS_IN_SUMMARY_TABLES)
     text, j_summary, i_summary, j_by_set, i_by_set = build_report(
         individual_path=ind,
@@ -633,7 +667,7 @@ def main() -> None:
         md_footer = (
             "\n## Machine-readable summaries\n\n"
             f"**Rollup** (one row per parameter, mean/min/max across sets): `{generalized_csv.name}`, "
-            f"`{indiv_csv.name}`. Generalized adds **`optimum_value`** (shared `PARAMS_TO_OPTIMIZE` at the "
+            f"`{indiv_csv.name}`. Generalized adds **`optimum_value`** (shared optimized parameters at the "
             f"specimen-set best `set_id`; `b_p` / `b_n` blank); individual adds **`mean_optima`** and "
             f"**`mean_optima_weighted`** (inverse-loss–weighted mean using `1/(final_J_total+eps)` at each "
             f"specimen's best set; default eps = {float(args.weighted_optima_eps):g}).\n\n"

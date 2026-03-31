@@ -1,19 +1,22 @@
 """
 Cycle-weighted landmark loss J_feat for prescribed (D, F) hysteresis.
 
-Twelve landmarks per weight cycle ``[s, e)`` on the experimental polyline: tension/compression
-first yield (|F| > f_y A_sc), global max/min force, F at D=0 on each yield-to-peak subpath,
-two mid-D points per side, then D at F=0 unloading after each peak. Simulation pairs at the
-same experimental D for slots 1–10 (force error / S_F); slots 11–12 compare unload D only / S_D.
+Twelve landmarks per weight cycle ``[s, e)`` on the experimental polyline (see
+``extract_cycle_landmarks``). ``J_feat`` uses, for every slot, the **sum** of normalized
+squared (or absolute) **force** and **displacement** error at the paired exp/sim points, so
+pairing logic does not depend on per-slot metric type.
 """
 from __future__ import annotations
 
 import math
 import warnings
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Sequence
 
 import numpy as np
 import pandas as pd
+from model.brace_geometry import compute_Q
 
 # Apparent plastic onset elsewhere (e.g. extract_bn_bp): |F| >= ratio * f_y * A_sc.
 # Landmarks use strict f_y * A_sc for yield picks (no 1.1 factor).
@@ -32,6 +35,31 @@ def deformation_scale_s_d(D: np.ndarray) -> float:
 def landmark_force_threshold_kip(fy_ksi: float, a_sc: float) -> float:
     """Yield force threshold [kip] = f_y * A_sc (landmark gating, no 1.1 factor)."""
     return float(fy_ksi) * float(a_sc)
+
+
+def yield_displacement_dy_in(
+    *,
+    fy_ksi: float,
+    E_ksi: float,
+    L_T_in: float,
+    L_y_in: float,
+    A_sc_in2: float,
+    A_t_in2: float,
+) -> float:
+    """Dy [in] = (f_y / E_hat) * L_T with E_hat = Q * E and Q from brace geometry."""
+    fy = float(fy_ksi)
+    E = float(E_ksi)
+    L_T = float(L_T_in)
+    if not (math.isfinite(fy) and math.isfinite(E) and math.isfinite(L_T)) or E <= 0.0 or L_T <= 0.0:
+        return float("nan")
+    try:
+        Q = float(compute_Q(float(L_T_in), float(L_y_in), float(A_sc_in2), float(A_t_in2)))
+    except Exception:
+        return float("nan")
+    E_hat = Q * E
+    if not (math.isfinite(E_hat) and E_hat > 0.0):
+        return float("nan")
+    return float((fy / E_hat) * L_T)
 
 
 def _interp_edge(
@@ -112,55 +140,207 @@ def _d_zero_cross_subpath(
     return None
 
 
-def _interp_f_at_deformation_on_path(
+def _first_peak_anchor_i0_from_peaks(
+    i_max: int,
+    i_min: int,
+    slot3_ok: bool,
+    slot4_ok: bool,
+) -> int | None:
+    """Earliest index among valid tension (``i_max``) / compression (``i_min``) peaks, or ``None``."""
+    anchors: list[int] = []
+    if slot3_ok:
+        anchors.append(int(i_max))
+    if slot4_ok:
+        anchors.append(int(i_min))
+    return int(min(anchors)) if anchors else None
+
+
+def _slot2_vertex_smallest_abs_d_on_first_sign_edge(
     D: np.ndarray,
     F: np.ndarray,
-    s: int,
-    e_path: int,
-    d_star: float,
-    *,
-    hint_idx: int,
-) -> float | None:
+    e: int,
+    i0: int,
+) -> tuple[float, float] | None:
     """
-    Linearly interpolate ``F`` at deformation ``d_star`` along the polyline
-    ``(D[j],F[j]) → (D[j+1],F[j+1])`` for ``j ∈ [s, e_path-2]``. If ``d_star`` lies on
-    several edges (non-monotonic ``D``), pick the edge whose ``j`` is closest to ``hint_idx``.
+    First edge after ``i0`` where ``D`` leaves the same side of zero as ``D[i0]``; return the
+    endpoint of that edge with smaller ``|D|`` (tie: earlier index).
+    If ``D[i0]==0``, fall back to first interpolated ``D=0`` crossing after ``i0``.
     """
-    if not np.isfinite(d_star) or e_path <= s + 1:
+    if i0 < 0 or i0 >= e:
         return None
-    best_j: int | None = None
-    best_dist = 10**18
-    for j in range(s, e_path - 1):
-        da, db = float(D[j]), float(D[j + 1])
-        fa, fb = float(F[j]), float(F[j + 1])
-        if not all(np.isfinite(x) for x in (da, db, fa, fb)):
+    d0 = float(D[i0])
+    if not np.isfinite(d0):
+        return None
+    if d0 == 0.0:
+        return _d_zero_cross_subpath(D, F, e, i0, e - 1)
+
+    for m in range(i0 + 1, e):
+        dm = float(D[m])
+        if not np.isfinite(dm):
             continue
-        lo, hi = (da, db) if da <= db else (db, da)
-        if lo - 1e-15 <= d_star <= hi + 1e-15:
-            dist = abs(j - int(hint_idx))
-            if dist < best_dist:
-                best_dist = dist
-                best_j = j
-    if best_j is None:
-        ih = int(np.clip(int(hint_idx), s, e_path - 1))
-        d_h = float(D[ih])
-        if np.isfinite(d_h) and abs(d_h - d_star) <= 1e-9 * (abs(d_star) + 1.0):
-            fh = float(F[ih])
-            return fh if np.isfinite(fh) else None
-        return None
-    j = best_j
-    da, db = float(D[j]), float(D[j + 1])
-    fa, fb = float(F[j]), float(F[j + 1])
-    if da == db:
-        return float(fa) if abs(d_star - da) <= 1e-15 * (abs(da) + 1.0) else None
-    t = (d_star - da) / (db - da)
-    return float(fa + t * (fb - fa))
+        if d0 > 0.0:
+            if dm > 0.0:
+                continue
+        else:
+            if dm < 0.0:
+                continue
+        k = m - 1
+        da, db = float(D[k]), float(D[k + 1])
+        fa, fb = float(F[k]), float(F[k + 1])
+        if not all(np.isfinite(x) for x in (da, db, fa, fb)):
+            return None
+        if abs(da) < abs(db):
+            j = k
+        elif abs(db) < abs(da):
+            j = k + 1
+        else:
+            j = k
+        return (float(D[j]), float(F[j]))
+    return None
 
 
 N_LANDMARK_SLOTS = 12
-# Slots 1–10 (indices 0..9): compare force at experimental D. Slots 11–12 (10,11): D at F=0 unload.
-LANDMARK_SLOTS_FORCE_METRIC = frozenset(range(10))
-LANDMARK_SLOTS_DISP_METRIC = frozenset({10, 11})
+# Slots 7–8 (1-based): F=0 at extremal D; ``pair_sim_cycle_landmarks`` uses F_sim=0 crossings.
+# Other slots pair on the shared D-grid via nearest vertex (see ``pair_sim_cycle_landmarks``).
+LANDMARK_SLOTS_F0_EXTREMAL_D = frozenset({6, 7})
+
+
+def _landmark_pair_path_window(
+    slot: int,
+    s: int,
+    e: int,
+    i_max: int,
+    i_min: int,
+    i_yt: int | None,
+    i_yc: int | None,
+    *,
+    i0_exp: int | None = None,
+) -> tuple[int, int]:
+    """Vertex index window ``[s_path, e_path)`` for grid pairing (same subpaths as former interp)."""
+    s_path, e_path = s, e
+    if slot == 1 and i0_exp is not None:
+        s_path = i0_exp
+    elif slot == 8:
+        e_path = i_max + 1
+    elif slot == 9:
+        e_path = i_min + 1
+    elif slot == 10 and i_yt is not None:
+        s_path = i_yt
+    elif slot == 11 and i_yc is not None:
+        s_path = i_yc
+    if e_path <= s_path + 1:
+        s_path, e_path = s, e
+    return s_path, e_path
+
+
+def _nearest_vertex_index(
+    D: np.ndarray,
+    d_star: float,
+    s_path: int,
+    e_path: int,
+) -> int | None:
+    """Index ``j ∈ [s_path, e_path)`` minimizing ``|D[j]-d_star|``; tie-break smallest ``j``."""
+    if not np.isfinite(d_star) or e_path <= s_path:
+        return None
+    d = np.asarray(D, dtype=float)
+    best_j: int | None = None
+    best_abs = float("inf")
+    for j in range(s_path, e_path):
+        dj = float(d[j])
+        if not np.isfinite(dj):
+            continue
+        ad = abs(dj - d_star)
+        if ad < best_abs or (ad == best_abs and (best_j is None or j < best_j)):
+            best_abs = ad
+            best_j = j
+    return best_j
+
+
+def _interp_edge_d_level(
+    da: float, db: float, fa: float, fb: float, target_d: float
+) -> tuple[float, float] | None:
+    """If target_d is bracketed on the edge, return (d_star,f_star) with d_star=target_d."""
+    if not (math.isfinite(da) and math.isfinite(db) and math.isfinite(fa) and math.isfinite(fb)):
+        return None
+    lo_d, hi_d = (da, db) if da <= db else (db, da)
+    if target_d < lo_d or target_d > hi_d:
+        return None
+    if db == da:
+        return None
+    frac = (target_d - da) / (db - da)
+    f_star = fa + frac * (fb - fa)
+    return (float(target_d), float(f_star))
+
+
+def _all_f_level_crossings(
+    D: np.ndarray,
+    F: np.ndarray,
+    s: int,
+    e: int,
+    level: float,
+) -> list[tuple[float, float]]:
+    """All F=level crossings on edges within [s,e). Returns list of (d_star, level)."""
+    out: list[tuple[float, float]] = []
+    s = max(0, int(s))
+    e = int(e)
+    if e <= s + 1:
+        return out
+    for k in range(s, e - 1):
+        da, db = float(D[k]), float(D[k + 1])
+        fa, fb = float(F[k]), float(F[k + 1])
+        if not all(math.isfinite(x) for x in (da, db, fa, fb)):
+            continue
+        if fa == level:
+            out.append((da, float(level)))
+            continue
+        if fb == level:
+            out.append((db, float(level)))
+            continue
+        if level == 0.0 and fa * fb < 0.0:
+            if fb == fa:
+                continue
+            frac = -fa / (fb - fa)
+            d_star = da + frac * (db - da)
+            out.append((float(d_star), 0.0))
+            continue
+        hit = _interp_edge(da, db, fa, fb, float(level))
+        if hit is not None:
+            out.append(hit)
+    return out
+
+
+def _all_d_level_crossings(
+    D: np.ndarray,
+    F: np.ndarray,
+    s: int,
+    e: int,
+    target_d: float,
+) -> list[tuple[float, float]]:
+    """All D=target_d crossings on edges within [s,e). Returns list of (target_d, f_star)."""
+    out: list[tuple[float, float]] = []
+    if not math.isfinite(float(target_d)):
+        return out
+    s = max(0, int(s))
+    e = int(e)
+    if e <= s + 1:
+        return out
+    td = float(target_d)
+    for k in range(s, e - 1):
+        da, db = float(D[k]), float(D[k + 1])
+        fa, fb = float(F[k]), float(F[k + 1])
+        if not all(math.isfinite(x) for x in (da, db, fa, fb)):
+            continue
+        if da == td:
+            out.append((td, float(fa)))
+            continue
+        if db == td:
+            out.append((td, float(fb)))
+            continue
+        if (da - td) * (db - td) < 0.0:
+            hit = _interp_edge_d_level(da, db, fa, fb, td)
+            if hit is not None:
+                out.append(hit)
+    return out
 
 
 def extract_cycle_landmarks(
@@ -171,17 +351,31 @@ def extract_cycle_landmarks(
     *,
     fy_ksi: float,
     a_sc: float,
+    dy_in: float | None = None,
 ) -> list[tuple[float, float] | None]:
     """
     Twelve experimental landmarks on ``[s, e)``.
 
-    Order (1-based labels in docs): (1) tension yield, (2) compression yield, (3) max F,
-    (4) min F, (5–6) F at D=0 on tension / compression yield→peak subpaths, (7–8) mid-D
-    tension pair, (9–10) mid-D compression pair, (11–12) D at F=0 after max tension / min
-    compression.
+    Slot meanings (1-based labels in debug plots/CSVs):
 
-    Yield: first index with ``F > F_thr`` in ``[s, i_max]`` (tension) and first with
-    ``F < -F_thr`` in ``[s, i_min]`` (compression), ``F_thr = f_y * A_sc`` [kip].
+    1. Cycle start point (D[s], F[s]).
+    2. After ``i0 = min`` of valid tension / compression peak indices: first edge ``(k,k+1)`` with
+       ``k >= i0`` where ``D`` crosses from the same side of zero as ``D[i0]`` to the other
+       (first ``m>i0`` with ``D[m]`` non-positive if ``D[i0]>0``, else non-negative if ``D[i0]<0``).
+       Landmark is the endpoint ``k`` or ``k+1`` with smaller ``|D|`` (tie: smaller index).
+       If ``D[i0]==0``, use the first interpolated ``D=0`` crossing after ``i0`` (legacy).
+    3. Max tension point (global max F in [s,e)).
+    4. Max compression point (global min F in [s,e)).
+    5. Tension yield: among points with F > +F_thr and D < 0 in [s,e), pick minimal D (tie: larger F).
+    6. Compression yield: among points with F < -F_thr and D > 0 in [s,e), pick maximal D (tie: more negative F).
+    7. F=0 crossing with maximal D (interpolated) within [s,e). (Displacement-scored.)
+    8. F=0 crossing with minimal D (interpolated) within [s,e). (Displacement-scored.)
+    9. Last crossing of D = (D_at_max_tension)/2 before the tension peak (within [s,i_max]).
+    10. Last crossing of D = (D_at_max_compression)/2 before the compression peak (within [s,i_min]).
+    11. First crossing of D = (D_at_tension_yield)/2 after tension yield (within [i_yield,e)).
+    12. First crossing of D = (D_at_compression_yield)/2 after compression yield (within [i_yield,e)).
+
+    `F_thr = f_y * A_sc` [kip].
     """
     out: list[tuple[float, float] | None] = [None] * N_LANDMARK_SLOTS
     if e <= s:
@@ -196,69 +390,118 @@ def extract_cycle_landmarks(
     fseg = F[s:e]
     if len(fseg) == 0:
         return out
-    rel_max = int(np.argmax(fseg))
-    rel_min = int(np.argmin(fseg))
-    i_max = s + rel_max
-    i_min = s + rel_min
+    i_max = s + int(np.argmax(fseg))
+    i_min = s + int(np.argmin(fseg))
 
+    # Gate: require the cycle to exceed ±2*Dy in at least one direction.
+    #
+    # If Dy is missing/invalid, do not compute landmarks for this cycle.
+    if dy_in is None or not (np.isfinite(float(dy_in)) and float(dy_in) > 0.0):
+        return out
+    dseg = D[s:e]
+    if len(dseg) == 0:
+        return out
+    d_max = float(np.nanmax(dseg))
+    d_min = float(np.nanmin(dseg))
+    thr = 2.0 * float(dy_in)
+    if not (np.isfinite(d_max) and np.isfinite(d_min)) or not (d_max >= thr or d_min <= -thr):
+        return out
+
+    # Slot 1: cycle start
+    out[0] = (float(D[s]), float(F[s])) if np.isfinite(D[s]) and np.isfinite(F[s]) else None
+
+    # Slots 3–4: max tension / max compression points, with sign requirements on (D, F).
+    # Slot 3 must be a positive-force peak occurring at positive deformation.
+    # Slot 4 must be a negative-force peak occurring at negative deformation.
+    slot3_ok = bool(
+        np.isfinite(D[i_max])
+        and np.isfinite(F[i_max])
+        and float(F[i_max]) > 0.0
+        and float(D[i_max]) > 0.0
+    )
+    slot4_ok = bool(
+        np.isfinite(D[i_min])
+        and np.isfinite(F[i_min])
+        and float(F[i_min]) < 0.0
+        and float(D[i_min]) < 0.0
+    )
+    out[2] = (float(D[i_max]), float(F[i_max])) if slot3_ok else None
+    out[3] = (float(D[i_min]), float(F[i_min])) if slot4_ok else None
+
+    i0 = _first_peak_anchor_i0_from_peaks(i_max, i_min, slot3_ok, slot4_ok)
+    if i0 is not None:
+        p2 = _slot2_vertex_smallest_abs_d_on_first_sign_edge(D, F, e, i0)
+        if p2 is not None:
+            out[1] = p2
+
+    # Slots 5–6: yields by extremal D among threshold-exceeding points in [s,e)
     i_yt: int | None = None
-    for i in range(s, i_max + 1):
-        if F[i] > F_thr:
+    best_d_yt = float("inf")
+    best_f_yt = -float("inf")
+    for i in range(s, e):
+        fi = float(F[i])
+        if not np.isfinite(fi) or fi <= F_thr:
+            continue
+        di = float(D[i])
+        if not np.isfinite(di) or di >= 0.0:
+            continue
+        if di < best_d_yt or (di == best_d_yt and fi > best_f_yt):
+            best_d_yt = di
+            best_f_yt = fi
             i_yt = i
-            break
+    if i_yt is not None:
+        out[4] = (float(D[i_yt]), float(F[i_yt]))
 
     i_yc: int | None = None
-    for i in range(s, i_min + 1):
-        if F[i] < -F_thr:
+    best_d_yc = -float("inf")
+    best_f_yc = float("inf")
+    for i in range(s, e):
+        fi = float(F[i])
+        if not np.isfinite(fi) or fi >= -F_thr:
+            continue
+        di = float(D[i])
+        if not np.isfinite(di) or di <= 0.0:
+            continue
+        if di > best_d_yc or (di == best_d_yc and fi < best_f_yc):
+            best_d_yc = di
+            best_f_yc = fi
             i_yc = i
-            break
-
-    out[2] = (float(D[i_max]), float(F[i_max]))
-    out[3] = (float(D[i_min]), float(F[i_min]))
-
-    if i_yt is not None:
-        out[0] = (float(D[i_yt]), float(F[i_yt]))
-        e_t = i_max + 1
-        hint_tm = (i_yt + i_max) // 2
-        zt = _d_zero_cross_subpath(D, F, e, i_yt, i_max)
-        if zt is not None:
-            out[4] = zt
-        d_yt = float(D[i_yt])
-        d_mt = float(D[i_max])
-        d_mid_a = 0.5 * (d_yt + 0.0)
-        d_mid_b = 0.5 * (0.0 + d_mt)
-        fa = _interp_f_at_deformation_on_path(D, F, i_yt, e_t, d_mid_a, hint_idx=i_yt)
-        if fa is not None and np.isfinite(fa):
-            out[6] = (d_mid_a, float(fa))
-        fb = _interp_f_at_deformation_on_path(D, F, i_yt, e_t, d_mid_b, hint_idx=hint_tm)
-        if fb is not None and np.isfinite(fb):
-            out[7] = (d_mid_b, float(fb))
-        if i_max < e - 1:
-            hu = _first_f_level_crossing(D, F, e, i_max, 0.0)
-            if hu is not None:
-                out[10] = (float(hu[0][0]), 0.0)
-
     if i_yc is not None:
-        out[1] = (float(D[i_yc]), float(F[i_yc]))
-        e_c = i_min + 1
-        hint_cm = (i_yc + i_min) // 2
-        zc = _d_zero_cross_subpath(D, F, e, i_yc, i_min)
-        if zc is not None:
-            out[5] = zc
-        d_yc = float(D[i_yc])
-        d_mc = float(D[i_min])
-        d_mid_ca = 0.5 * (d_yc + 0.0)
-        d_mid_cb = 0.5 * (0.0 + d_mc)
-        fca = _interp_f_at_deformation_on_path(D, F, i_yc, e_c, d_mid_ca, hint_idx=i_yc)
-        if fca is not None and np.isfinite(fca):
-            out[8] = (d_mid_ca, float(fca))
-        fcb = _interp_f_at_deformation_on_path(D, F, i_yc, e_c, d_mid_cb, hint_idx=hint_cm)
-        if fcb is not None and np.isfinite(fcb):
-            out[9] = (d_mid_cb, float(fcb))
-        if i_min < e - 1:
-            hc = _first_f_level_crossing(D, F, e, i_min, 0.0)
-            if hc is not None:
-                out[11] = (float(hc[0][0]), 0.0)
+        out[5] = (float(D[i_yc]), float(F[i_yc]))
+
+    # Slots 7–8: F=0 crossings with extremal D (interpolated) within [s,e)
+    f0 = _all_f_level_crossings(D, F, s, e, 0.0)
+    if f0:
+        out[6] = max(f0, key=lambda p: p[0])
+        out[7] = min(f0, key=lambda p: p[0])
+
+    # Slot 9: last D = D_at_max_tension/2 crossing before tension peak (within [s,i_max])
+    if slot3_ok and np.isfinite(D[i_max]) and i_max > s:
+        tgt = 0.5 * float(D[i_max])
+        hits = _all_d_level_crossings(D, F, s, i_max + 1, tgt)
+        if hits:
+            out[8] = hits[-1]
+
+    # Slot 10: last D = D_at_max_compression/2 crossing before compression peak (within [s,i_min])
+    if slot4_ok and np.isfinite(D[i_min]) and i_min > s:
+        tgt = 0.5 * float(D[i_min])
+        hits = _all_d_level_crossings(D, F, s, i_min + 1, tgt)
+        if hits:
+            out[9] = hits[-1]
+
+    # Slot 11: first D = D_at_tension_yield/2 crossing after tension yield
+    if i_yt is not None and np.isfinite(D[i_yt]) and e > i_yt + 1:
+        tgt = 0.5 * float(D[i_yt])
+        hits = _all_d_level_crossings(D, F, i_yt, e, tgt)
+        if hits:
+            out[10] = hits[0]
+
+    # Slot 12: first D = D_at_compression_yield/2 crossing after compression yield
+    if i_yc is not None and np.isfinite(D[i_yc]) and e > i_yc + 1:
+        tgt = 0.5 * float(D[i_yc])
+        hits = _all_d_level_crossings(D, F, i_yc, e, tgt)
+        if hits:
+            out[11] = hits[0]
 
     return out
 
@@ -270,24 +513,26 @@ def cycle_landmarks_experiment_cached(
     e: int,
     fy_ksi: float,
     a_sc: float,
+    dy_in: float | None,
     cache: dict | None,
 ) -> list[tuple[float, float] | None]:
     """Cached ``extract_cycle_landmarks`` for experiment; keys use ``id(D)``, ``id(F_exp)``."""
     if cache is None:
         return extract_cycle_landmarks(
-            D, F_exp, s, e, fy_ksi=fy_ksi, a_sc=a_sc
+            D, F_exp, s, e, fy_ksi=fy_ksi, a_sc=a_sc, dy_in=dy_in
         )
-    key = (id(D), id(F_exp), int(s), int(e), float(fy_ksi), float(a_sc))
+    key = (id(D), id(F_exp), int(s), int(e), float(fy_ksi), float(a_sc), float(dy_in) if dy_in is not None else None)
     hit = cache.get(key)
     if hit is not None:
         return hit
-    le = extract_cycle_landmarks(D, F_exp, s, e, fy_ksi=fy_ksi, a_sc=a_sc)
+    le = extract_cycle_landmarks(D, F_exp, s, e, fy_ksi=fy_ksi, a_sc=a_sc, dy_in=dy_in)
     cache[key] = le
     return le
 
 
 def pair_sim_cycle_landmarks(
     D: np.ndarray,
+    F_exp: np.ndarray,
     F_sim: np.ndarray,
     s: int,
     e: int,
@@ -295,70 +540,117 @@ def pair_sim_cycle_landmarks(
     *,
     fy_ksi: float,
     a_sc: float,
-) -> list[tuple[float, float] | None]:
+) -> tuple[list[tuple[float, float] | None], list[tuple[float, float] | None]]:
     """
-    Build simulated landmarks paired to ``le``: slots 0–9 use experimental D and ``F_sim``
-    interpolated on ``(D, F_sim)``; slots 10–11 use unload D from ``F_sim`` after peak indices
-    (same geometry as experiment).
+    Pair experimental landmarks to simulated ones on the **shared displacement grid** ``D``.
+
+    - Slots other than F=0 extremal (indices 6,7): target displacement ``d_e`` from ``le[slot]``;
+      find vertex index ``j`` in the same path window as ``extract_cycle_landmarks`` / former interp
+      (via ``_landmark_pair_path_window``) minimizing ``|D[j]-d_e|``; set
+      ``le_metric[slot]=(D[j],F_exp[j])`` and ``ls[slot]=(D[j],F_sim[j])``. If no valid ``j``, ``ls``
+      stays ``None`` and ``le_metric[slot]`` stays the original ``le[slot]``.
+    - F=0 extremal-D (6,7): unchanged semantics — sim from F_sim=0 crossings when the matching exp
+      slot exists; ``le_metric[6/7]`` remains ``le[6/7]``.
+
+    Returns ``(ls, le_metric)``. Use ``le_metric`` with ``ls`` in feature loss so exp/sim share index ``j``.
     """
     ls: list[tuple[float, float] | None] = [None] * N_LANDMARK_SLOTS
+    le_metric: list[tuple[float, float] | None] = list(le)
     if e <= s:
-        return ls
+        return ls, le_metric
 
     D = np.asarray(D, dtype=float)
+    F_exp = np.asarray(F_exp, dtype=float)
     F_sim = np.asarray(F_sim, dtype=float)
+    if D.shape != F_exp.shape or D.shape != F_sim.shape:
+        return ls, le_metric
+
     F_thr = landmark_force_threshold_kip(fy_ksi, a_sc)
 
     fseg = F_sim[s:e]
     if len(fseg) == 0:
-        return ls
+        return ls, le_metric
     i_max = s + int(np.argmax(fseg))
     i_min = s + int(np.argmin(fseg))
 
-    i_yt: int | None = None
-    for i in range(s, i_max + 1):
-        if F_sim[i] > F_thr:
-            i_yt = i
-            break
-    i_yc: int | None = None
-    for i in range(s, i_min + 1):
-        if F_sim[i] < -F_thr:
-            i_yc = i
-            break
+    fseg_exp = F_exp[s:e]
+    i_max_exp = s + int(np.argmax(fseg_exp))
+    i_min_exp = s + int(np.argmin(fseg_exp))
+    slot3_ok_e = bool(
+        np.isfinite(D[i_max_exp])
+        and np.isfinite(F_exp[i_max_exp])
+        and float(F_exp[i_max_exp]) > 0.0
+        and float(D[i_max_exp]) > 0.0
+    )
+    slot4_ok_e = bool(
+        np.isfinite(D[i_min_exp])
+        and np.isfinite(F_exp[i_min_exp])
+        and float(F_exp[i_min_exp]) < 0.0
+        and float(D[i_min_exp]) < 0.0
+    )
+    i0_exp = _first_peak_anchor_i0_from_peaks(
+        i_max_exp, i_min_exp, slot3_ok_e, slot4_ok_e
+    )
 
-    for slot in range(10):
+    i_yt: int | None = None
+    best_d_yt = float("inf")
+    best_f_yt = -float("inf")
+    for i in range(s, e):
+        fi = float(F_sim[i])
+        if not np.isfinite(fi) or fi <= F_thr:
+            continue
+        di = float(D[i])
+        if not np.isfinite(di):
+            continue
+        if di < best_d_yt or (di == best_d_yt and fi > best_f_yt):
+            best_d_yt = di
+            best_f_yt = fi
+            i_yt = i
+
+    i_yc: int | None = None
+    best_d_yc = -float("inf")
+    best_f_yc = float("inf")
+    for i in range(s, e):
+        fi = float(F_sim[i])
+        if not np.isfinite(fi) or fi >= -F_thr:
+            continue
+        di = float(D[i])
+        if not np.isfinite(di):
+            continue
+        if di > best_d_yc or (di == best_d_yc and fi < best_f_yc):
+            best_d_yc = di
+            best_f_yc = fi
+            i_yc = i
+
+    for slot in range(N_LANDMARK_SLOTS):
+        if slot in LANDMARK_SLOTS_F0_EXTREMAL_D:
+            continue
         if le[slot] is None:
             continue
         d_e, _ = le[slot]
         if not np.isfinite(d_e):
             continue
-        hint = s
-        if slot == 0 and i_yt is not None:
-            hint = i_yt
-        elif slot == 1 and i_yc is not None:
-            hint = i_yc
-        elif slot == 2:
-            hint = i_max
-        elif slot == 3:
-            hint = i_min
-        elif slot in (4, 6, 7) and i_yt is not None:
-            hint = (i_yt + i_max) // 2
-        elif slot in (5, 8, 9) and i_yc is not None:
-            hint = (i_yc + i_min) // 2
-        f_s = _interp_f_at_deformation_on_path(D, F_sim, s, e, float(d_e), hint_idx=hint)
-        if f_s is not None and np.isfinite(f_s):
-            ls[slot] = (float(d_e), float(f_s))
+        s_path, e_path = _landmark_pair_path_window(
+            slot, s, e, i_max, i_min, i_yt, i_yc, i0_exp=i0_exp
+        )
+        j = _nearest_vertex_index(D, float(d_e), s_path, e_path)
+        if j is None:
+            continue
+        dj, fxe, fxs = float(D[j]), float(F_exp[j]), float(F_sim[j])
+        if not (np.isfinite(dj) and np.isfinite(fxe) and np.isfinite(fxs)):
+            continue
+        le_metric[slot] = (dj, fxe)
+        ls[slot] = (dj, fxs)
 
-    if le[10] is not None and i_max < e - 1:
-        hu = _first_f_level_crossing(D, F_sim, e, i_max, 0.0)
-        if hu is not None:
-            ls[10] = (float(hu[0][0]), 0.0)
-    if le[11] is not None and i_min < e - 1:
-        hc = _first_f_level_crossing(D, F_sim, e, i_min, 0.0)
-        if hc is not None:
-            ls[11] = (float(hc[0][0]), 0.0)
+    if le[6] is not None or le[7] is not None:
+        f0 = _all_f_level_crossings(D, F_sim, s, e, 0.0)
+        if f0:
+            if le[6] is not None:
+                ls[6] = max(f0, key=lambda p: p[0])
+            if le[7] is not None:
+                ls[7] = min(f0, key=lambda p: p[0])
 
-    return ls
+    return ls, le_metric
 
 
 def plastic_mask_full_cycle(
@@ -443,6 +735,203 @@ def _slot_error_disp_l1(
     return abs(ds - de) * inv_d
 
 
+def _slot_error_combined_sq(
+    p_exp: tuple[float, float] | None,
+    p_sim: tuple[float, float] | None,
+    s_f: float,
+    s_d: float,
+) -> float | None:
+    """``((ΔF)/S_F)^2 + ((ΔD)/S_D)^2`` omitting any term whose inputs are non-finite."""
+    if p_exp is None or p_sim is None:
+        return None
+    ef = _slot_error_force_sq(p_exp, p_sim, s_f)
+    ed = _slot_error_disp_sq(p_exp, p_sim, s_d)
+    if ef is None and ed is None:
+        return None
+    return float((ef or 0.0) + (ed or 0.0))
+
+
+def _slot_error_combined_l1(
+    p_exp: tuple[float, float] | None,
+    p_sim: tuple[float, float] | None,
+    s_f: float,
+    s_d: float,
+) -> float | None:
+    """``|ΔF|/S_F + |ΔD|/S_D`` omitting any term whose inputs are non-finite."""
+    if p_exp is None or p_sim is None:
+        return None
+    ef = _slot_error_force_l1(p_exp, p_sim, s_f)
+    ed = _slot_error_disp_l1(p_exp, p_sim, s_d)
+    if ef is None and ed is None:
+        return None
+    return float((ef or 0.0) + (ed or 0.0))
+
+
+@dataclass(frozen=True)
+class JfeatCycleRecord:
+    """Per weight-cycle J_feat means and amplitude weight ``w_c`` (``meta`` row)."""
+
+    cycle_id: int
+    start: int
+    end: int
+    kind: object
+    incomplete: object
+    w_c: float
+    j_feat_l2_mean: float
+    j_feat_l1_mean: float
+    n_slots: int
+    contributes: bool
+
+
+def jfeat_per_cycle_records(
+    D: np.ndarray,
+    F_exp: np.ndarray,
+    F_sim: np.ndarray,
+    meta: list[dict],
+    *,
+    s_d: float,
+    s_f: float,
+    fy_ksi: float,
+    A_sc: float,
+    dy_in: float | None = None,
+    exp_landmark_cache: dict | None = None,
+) -> list[JfeatCycleRecord]:
+    """
+    One record per ``meta`` row: mean landmark L2 / L1 error within the cycle and ``w_c``.
+
+    ``contributes`` is True iff at least one landmark slot contributed; those rows enter the
+    weighted mean for ``feature_mse_cycles`` / ``feature_mae_cycles``.
+    """
+    D = np.asarray(D, dtype=float)
+    F_exp = np.asarray(F_exp, dtype=float)
+    F_sim = np.asarray(F_sim, dtype=float)
+    nan = float("nan")
+    out: list[JfeatCycleRecord] = []
+    if F_exp.shape != F_sim.shape or D.shape != F_exp.shape:
+        return out
+
+    for cycle_id, m in enumerate(meta):
+        s, e = int(m["start"]), int(m["end"])
+        w_c = float(m.get("w_c", 1.0))
+        if not np.isfinite(w_c) or w_c <= 0.0:
+            w_c = 1.0
+        kind = m.get("kind")
+        inc = m.get("incomplete")
+        if e <= s:
+            out.append(
+                JfeatCycleRecord(
+                    cycle_id=cycle_id,
+                    start=s,
+                    end=e,
+                    kind=kind,
+                    incomplete=inc,
+                    w_c=w_c,
+                    j_feat_l2_mean=nan,
+                    j_feat_l1_mean=nan,
+                    n_slots=0,
+                    contributes=False,
+                )
+            )
+            continue
+
+        le = cycle_landmarks_experiment_cached(
+            D, F_exp, s, e, fy_ksi, A_sc, dy_in, exp_landmark_cache
+        )
+        ls, le_m = pair_sim_cycle_landmarks(
+            D, F_exp, F_sim, s, e, le, fy_ksi=fy_ksi, a_sc=A_sc
+        )
+
+        errs_l2: list[float] = []
+        errs_l1: list[float] = []
+        for i in range(N_LANDMARK_SLOTS):
+            ee2 = _slot_error_combined_sq(le_m[i], ls[i], s_f, s_d)
+            ee1 = _slot_error_combined_l1(le_m[i], ls[i], s_f, s_d)
+            if ee2 is not None:
+                errs_l2.append(ee2)
+            if ee1 is not None:
+                errs_l1.append(ee1)
+
+        n_l2 = len(errs_l2)
+        if n_l2 == 0:
+            out.append(
+                JfeatCycleRecord(
+                    cycle_id=cycle_id,
+                    start=s,
+                    end=e,
+                    kind=kind,
+                    incomplete=inc,
+                    w_c=w_c,
+                    j_feat_l2_mean=nan,
+                    j_feat_l1_mean=nan,
+                    n_slots=0,
+                    contributes=False,
+                )
+            )
+            continue
+
+        bar_l2 = float(sum(errs_l2) / n_l2)
+        bar_l1 = float(sum(errs_l1) / len(errs_l1)) if errs_l1 else nan
+        out.append(
+            JfeatCycleRecord(
+                cycle_id=cycle_id,
+                start=s,
+                end=e,
+                kind=kind,
+                incomplete=inc,
+                w_c=w_c,
+                j_feat_l2_mean=bar_l2,
+                j_feat_l1_mean=bar_l1,
+                n_slots=n_l2,
+                contributes=True,
+            )
+        )
+    return out
+
+
+def aggregate_jfeat_l2_from_records(rows: Sequence[JfeatCycleRecord]) -> float:
+    """``sum w_c * j_feat_l2_mean / sum w_c`` over rows with ``contributes``."""
+    contrib = [r for r in rows if r.contributes]
+    if not contrib:
+        warnings.warn(
+            "aggregate_jfeat_l2_from_records: no contributing cycles; returning 0.0",
+            UserWarning,
+            stacklevel=2,
+        )
+        return 0.0
+    numer = sum(r.w_c * r.j_feat_l2_mean for r in contrib)
+    denom = sum(r.w_c for r in contrib)
+    if denom <= 0.0 or not np.isfinite(denom):
+        warnings.warn(
+            "aggregate_jfeat_l2_from_records: zero or non-finite denominator; returning 0.0",
+            UserWarning,
+            stacklevel=2,
+        )
+        return 0.0
+    return float(numer / denom)
+
+
+def aggregate_jfeat_l1_from_records(rows: Sequence[JfeatCycleRecord]) -> float:
+    """``sum w_c * j_feat_l1_mean / sum w_c`` over rows with ``contributes``."""
+    contrib = [r for r in rows if r.contributes]
+    if not contrib:
+        warnings.warn(
+            "aggregate_jfeat_l1_from_records: no contributing cycles; returning 0.0",
+            UserWarning,
+            stacklevel=2,
+        )
+        return 0.0
+    numer = sum(r.w_c * r.j_feat_l1_mean for r in contrib)
+    denom = sum(r.w_c for r in contrib)
+    if denom <= 0.0 or not np.isfinite(denom):
+        warnings.warn(
+            "aggregate_jfeat_l1_from_records: zero or non-finite denominator; returning 0.0",
+            UserWarning,
+            stacklevel=2,
+        )
+        return 0.0
+    return float(numer / denom)
+
+
 def feature_mse_cycles(
     D: np.ndarray,
     F_exp: np.ndarray,
@@ -453,61 +942,34 @@ def feature_mse_cycles(
     s_f: float,
     fy_ksi: float,
     A_sc: float,
+    dy_in: float | None = None,
     exp_landmark_cache: dict | None = None,
 ) -> float:
     """
-    Cycle-weighted mean of per-cycle mean squared landmark error: force slots use
-    ``((F_sim - F_exp)/S_F)^2`` at experimental D; displacement slots use ``((D_sim - D_exp)/S_D)^2``.
+    Cycle-weighted mean of per-cycle mean squared landmark error: each slot contributes
+    ``((F_sim - F_exp)/S_F)^2 + ((D_sim - D_exp)/S_D)^2`` (omitting non-finite parts).
     """
-    D = np.asarray(D, dtype=float)
-    F_exp = np.asarray(F_exp, dtype=float)
-    F_sim = np.asarray(F_sim, dtype=float)
-    if F_exp.shape != F_sim.shape or D.shape != F_exp.shape:
-        return 0.0
     if not meta:
-        return 0.0
-
-    numer = 0.0
-    denom = 0.0
-    for m in meta:
-        s, e = int(m["start"]), int(m["end"])
-        if e <= s:
-            continue
-        w_c = float(m.get("w_c", 1.0))
-        if not np.isfinite(w_c) or w_c <= 0.0:
-            w_c = 1.0
-
-        le = cycle_landmarks_experiment_cached(
-            D, F_exp, s, e, fy_ksi, A_sc, exp_landmark_cache
-        )
-        ls = pair_sim_cycle_landmarks(
-            D, F_sim, s, e, le, fy_ksi=fy_ksi, a_sc=A_sc
-        )
-
-        errs: list[float] = []
-        for i in range(N_LANDMARK_SLOTS):
-            if i in LANDMARK_SLOTS_FORCE_METRIC:
-                ee = _slot_error_force_sq(le[i], ls[i], s_f)
-            else:
-                ee = _slot_error_disp_sq(le[i], ls[i], s_d)
-            if ee is not None:
-                errs.append(ee)
-
-        m_c = len(errs)
-        if m_c == 0:
-            continue
-        bar_e = float(sum(errs) / m_c)
-        numer += w_c * bar_e
-        denom += w_c
-
-    if denom <= 0.0 or not np.isfinite(denom):
         warnings.warn(
-            "feature_mse_cycles: no contributing cycles; returning 0.0",
+            "feature_mse_cycles: empty meta; returning 0.0",
             UserWarning,
             stacklevel=2,
         )
         return 0.0
-    return float(numer / denom)
+    return aggregate_jfeat_l2_from_records(
+        jfeat_per_cycle_records(
+            D,
+            F_exp,
+            F_sim,
+            meta,
+            s_d=s_d,
+            s_f=s_f,
+            fy_ksi=fy_ksi,
+            A_sc=A_sc,
+            dy_in=dy_in,
+            exp_landmark_cache=exp_landmark_cache,
+        )
+    )
 
 
 def feature_mae_cycles(
@@ -520,58 +982,31 @@ def feature_mae_cycles(
     s_f: float,
     fy_ksi: float,
     A_sc: float,
+    dy_in: float | None = None,
     exp_landmark_cache: dict | None = None,
 ) -> float:
-    """Same weighting as ``feature_mse_cycles``; per-slot L1: |ΔF|/S_F or |ΔD|/S_D."""
-    D = np.asarray(D, dtype=float)
-    F_exp = np.asarray(F_exp, dtype=float)
-    F_sim = np.asarray(F_sim, dtype=float)
-    if F_exp.shape != F_sim.shape or D.shape != F_exp.shape:
-        return 0.0
+    """Same weighting as ``feature_mse_cycles``; per-slot L1: |ΔF|/S_F + |ΔD|/S_D."""
     if not meta:
-        return 0.0
-
-    numer = 0.0
-    denom = 0.0
-    for m in meta:
-        s, e = int(m["start"]), int(m["end"])
-        if e <= s:
-            continue
-        w_c = float(m.get("w_c", 1.0))
-        if not np.isfinite(w_c) or w_c <= 0.0:
-            w_c = 1.0
-
-        le = cycle_landmarks_experiment_cached(
-            D, F_exp, s, e, fy_ksi, A_sc, exp_landmark_cache
-        )
-        ls = pair_sim_cycle_landmarks(
-            D, F_sim, s, e, le, fy_ksi=fy_ksi, a_sc=A_sc
-        )
-
-        errs: list[float] = []
-        for i in range(N_LANDMARK_SLOTS):
-            if i in LANDMARK_SLOTS_FORCE_METRIC:
-                ee = _slot_error_force_l1(le[i], ls[i], s_f)
-            else:
-                ee = _slot_error_disp_l1(le[i], ls[i], s_d)
-            if ee is not None:
-                errs.append(ee)
-
-        m_c = len(errs)
-        if m_c == 0:
-            continue
-        bar_e = float(sum(errs) / m_c)
-        numer += w_c * bar_e
-        denom += w_c
-
-    if denom <= 0.0 or not np.isfinite(denom):
         warnings.warn(
-            "feature_mae_cycles: no contributing cycles; returning 0.0",
+            "feature_mae_cycles: empty meta; returning 0.0",
             UserWarning,
             stacklevel=2,
         )
         return 0.0
-    return float(numer / denom)
+    return aggregate_jfeat_l1_from_records(
+        jfeat_per_cycle_records(
+            D,
+            F_exp,
+            F_sim,
+            meta,
+            s_d=s_d,
+            s_f=s_f,
+            fy_ksi=fy_ksi,
+            A_sc=A_sc,
+            dy_in=dy_in,
+            exp_landmark_cache=exp_landmark_cache,
+        )
+    )
 
 
 def load_p_y_kip_catalog(project_root: Path, name: str, fallback_fyp_ksi: float, a_sc: float) -> float:
@@ -592,9 +1027,52 @@ def load_p_y_kip_catalog(project_root: Path, name: str, fallback_fyp_ksi: float,
     return float(fallback_fyp_ksi * a_sc)
 
 
+def jfeat_means_from_paired_landmarks(
+    le_m: list[tuple[float, float] | None],
+    ls: list[tuple[float, float] | None],
+    s_f: float,
+    s_d: float,
+) -> tuple[float, float, int]:
+    """
+    Per-cycle mean ``J_feat`` L2 and L1 from already-paired landmarks (``le_m``, ``ls``).
+
+    Returns ``(j_feat_l2_mean, j_feat_l1_mean, n_slots)`` with NaNs and ``n_slots==0`` if no slot
+    contributes (same slot logic as ``jfeat_per_cycle_records``).
+    """
+    errs_l2: list[float] = []
+    errs_l1: list[float] = []
+    for i in range(N_LANDMARK_SLOTS):
+        ee2 = _slot_error_combined_sq(le_m[i], ls[i], s_f, s_d)
+        ee1 = _slot_error_combined_l1(le_m[i], ls[i], s_f, s_d)
+        if ee2 is not None:
+            errs_l2.append(ee2)
+        if ee1 is not None:
+            errs_l1.append(ee1)
+    if len(errs_l2) == 0:
+        return float("nan"), float("nan"), 0
+    bar_l2 = float(sum(errs_l2) / len(errs_l2))
+    bar_l1 = float(sum(errs_l1) / len(errs_l1)) if errs_l1 else float("nan")
+    return bar_l2, bar_l1, len(errs_l2)
+
+
 LANDMARK_EXP_CSV_COLUMNS: list[str] = (
-    ["Name", "set_id", "cycle_id", "start", "end", "kind", "incomplete", "F_thr_kip"]
+    [
+        "Name",
+        "set_id",
+        "cycle_id",
+        "start",
+        "end",
+        "kind",
+        "incomplete",
+        "F_thr_kip",
+        "w_c",
+        "j_feat_l2_mean",
+        "j_feat_l1_mean",
+        "n_jfeat_slots",
+        "jfeat_contributes",
+    ]
     + [c for k in range(1, N_LANDMARK_SLOTS + 1) for c in (f"d_{k}", f"f_{k}")]
+    + [c for k in range(1, N_LANDMARK_SLOTS + 1) for c in (f"d_sim_{k}", f"f_sim_{k}")]
 )
 
 
@@ -607,9 +1085,16 @@ def landmark_exp_row_dict(
     *,
     fy_ksi: float,
     a_sc: float,
+    ls: list[tuple[float, float] | None] | None = None,
+    w_c: float = 1.0,
+    j_feat_l2_mean: float = float("nan"),
+    j_feat_l1_mean: float = float("nan"),
+    n_jfeat_slots: int = 0,
+    jfeat_contributes: bool = False,
 ) -> dict:
-    """One CSV row dict for experimental landmarks (NaN for missing slots)."""
+    """One CSV row: experimental ``d_k,f_k`` and simulated ``d_sim_k,f_sim_k`` (NaN if missing)."""
     F_thr = landmark_force_threshold_kip(fy_ksi, a_sc)
+    ls_eff = ls if ls is not None else [None] * N_LANDMARK_SLOTS
     row: dict = {
         "Name": specimen_id,
         "set_id": set_id,
@@ -619,6 +1104,11 @@ def landmark_exp_row_dict(
         "kind": meta_row.get("kind"),
         "incomplete": meta_row.get("incomplete"),
         "F_thr_kip": F_thr,
+        "w_c": float(w_c),
+        "j_feat_l2_mean": float(j_feat_l2_mean),
+        "j_feat_l1_mean": float(j_feat_l1_mean),
+        "n_jfeat_slots": int(n_jfeat_slots),
+        "jfeat_contributes": bool(jfeat_contributes),
     }
     for k in range(N_LANDMARK_SLOTS):
         p = le[k]
@@ -629,4 +1119,12 @@ def landmark_exp_row_dict(
             d, f = p
             row[f"d_{k + 1}"] = d
             row[f"f_{k + 1}"] = f
+        ps = ls_eff[k]
+        if ps is None:
+            row[f"d_sim_{k + 1}"] = float("nan")
+            row[f"f_sim_{k + 1}"] = float("nan")
+        else:
+            ds, fs = ps
+            row[f"d_sim_{k + 1}"] = ds
+            row[f"f_sim_{k + 1}"] = fs
     return row

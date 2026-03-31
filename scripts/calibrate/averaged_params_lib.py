@@ -32,17 +32,29 @@ def compute_weighted_averaged_param_dict(
     *,
     by_set_id: bool,
     weight_fn: Callable[[str], float],
+    param_cols_by_set_id: dict[Any, list[str]] | None = None,
 ) -> dict[Any, pd.Series]:
     """
-    Weighted mean of ``param_cols`` per group. Rows with weight 0 are omitted from aggregates.
+    Weighted mean of parameter columns per group. Rows with weight 0 are omitted from aggregates.
 
     If ``by_set_id``, returns ``set_id -> Series``; else ``{"_global": Series}``.
+
+    When ``param_cols_by_set_id`` is set and ``by_set_id`` is true, each ``set_id`` group uses
+    ``param_cols_by_set_id.get(sid, param_cols)`` for which columns are averaged (must exist in
+    ``params_df``). Global mode (``by_set_id`` false) always uses ``param_cols``; the by-set map
+    is ignored.
     """
     if "Name" not in params_df.columns:
         raise ValueError("params_df must have a Name column.")
-    missing = [c for c in param_cols if c not in params_df.columns]
-    if missing:
-        raise ValueError(f"Parameters CSV missing columns required for averaging: {missing}")
+
+    def _require_cols(cols: list[str], *, label: str) -> None:
+        missing = [c for c in cols if c not in params_df.columns]
+        if missing:
+            raise ValueError(
+                f"Parameters CSV missing columns required for averaging ({label}): {missing}"
+            )
+
+    _require_cols(param_cols, label="default param_cols")
 
     name_col = params_df["Name"].astype(str)
     w_all = _weights_for_group(name_col, weight_fn)
@@ -50,30 +62,49 @@ def compute_weighted_averaged_param_dict(
     train = params_df.loc[train_mask].copy()
     if train.empty:
         raise ValueError("No rows with positive weight; cannot form averaged parameters.")
-    # Rows with NaN optimized parameters (e.g. catalog placeholders) must not enter the weighted mean.
-    finite_mask = train[param_cols].apply(
-        lambda r: bool(np.all(np.isfinite(r.to_numpy(dtype=float)))),
-        axis=1,
-    )
-    train = train.loc[finite_mask].copy()
-    if train.empty:
-        raise ValueError(
-            "No rows with positive weight and finite averaged columns "
-            f"{param_cols}; cannot form averaged parameters."
-        )
+
+    if param_cols_by_set_id is not None and by_set_id:
+        for cols in param_cols_by_set_id.values():
+            _require_cols(cols, label=f"set_id override {cols!r}")
 
     out: dict[Any, pd.Series] = {}
 
     if by_set_id:
         for sid, grp in train.groupby(train["set_id"]):
-            w = _weights_for_group(grp["Name"].astype(str), weight_fn)
-            out[sid] = _weighted_mean_series(grp, param_cols, w)
+            sid_key = int(pd.to_numeric(sid, errors="raise"))
+            cols = (
+                list(param_cols_by_set_id.get(sid_key, param_cols))
+                if param_cols_by_set_id is not None
+                else param_cols
+            )
+            finite_mask = grp[cols].apply(
+                lambda r: bool(np.all(np.isfinite(r.to_numpy(dtype=float)))),
+                axis=1,
+            )
+            grp_ok = grp.loc[finite_mask].copy()
+            if grp_ok.empty:
+                raise ValueError(
+                    "No rows with positive weight and finite values for columns "
+                    f"{cols} within set_id={sid!r}; cannot form averaged parameters."
+                )
+            w = _weights_for_group(grp_ok["Name"].astype(str), weight_fn)
+            out[sid_key] = _weighted_mean_series(grp_ok, cols, w)
         if not out:
             raise ValueError("by_set_id averaging produced no groups.")
         return out
 
-    w = _weights_for_group(train["Name"].astype(str), weight_fn)
-    out["_global"] = _weighted_mean_series(train, param_cols, w)
+    finite_mask = train[param_cols].apply(
+        lambda r: bool(np.all(np.isfinite(r.to_numpy(dtype=float)))),
+        axis=1,
+    )
+    train_g = train.loc[finite_mask].copy()
+    if train_g.empty:
+        raise ValueError(
+            "No rows with positive weight and finite averaged columns "
+            f"{param_cols}; cannot form averaged parameters."
+        )
+    w = _weights_for_group(train_g["Name"].astype(str), weight_fn)
+    out["_global"] = _weighted_mean_series(train_g, param_cols, w)
     return out
 
 
@@ -98,9 +129,15 @@ def get_averaged_for_set_id(
     """Return averaged ``Series`` for ``set_id``, or the global pool entry when ``by_set_id`` is false."""
     if not by_set_id:
         return pool["_global"]
-    if set_id not in pool:
-        raise KeyError(
-            f"No averaged parameters for set_id={set_id!r}. "
-            f"Available set_ids from training pool: {sorted(pool.keys(), key=str)}"
-        )
-    return pool[set_id]
+    try:
+        sid_key = int(pd.to_numeric(set_id, errors="raise"))
+    except (ValueError, TypeError):
+        sid_key = set_id
+    if sid_key in pool:
+        return pool[sid_key]
+    if set_id in pool:
+        return pool[set_id]
+    raise KeyError(
+        f"No averaged parameters for set_id={set_id!r}. "
+        f"Available set_ids from training pool: {sorted(pool.keys(), key=str)}"
+    )

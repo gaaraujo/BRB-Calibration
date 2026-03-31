@@ -49,14 +49,14 @@ def d_sampling_from_brace_params(
     u_fallback: np.ndarray,
 ) -> float:
     """
-    D_sampling = Dy / 10 with Dy = fyp * L_T / E_hat, E_hat = Q * E.
+    D_sampling = Dy / 4 with Dy = fyp * L_T / E_hat, E_hat = Q * E.
     If invalid, fall back to max(|u|)/100 and warn.
     """
     Q = compute_Q_brace(L_T_in, L_y_in, A_sc_in2, A_t_in2)
     E_hat = Q * float(E_ksi)
     Dy = yield_deformation_inches(fyp_ksi, L_T_in, E_hat)
     if np.isfinite(Dy) and Dy > 0.0:
-        return float(Dy / 10.0)
+        return float(Dy / 4.0)
     umax = float(np.nanmax(np.abs(np.asarray(u_fallback, dtype=float))))
     if not np.isfinite(umax) or umax <= 0.0:
         umax = 1.0

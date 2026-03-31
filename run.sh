@@ -103,7 +103,8 @@ run_pipeline_steps() {
   # Per-cycle panels, shaded int F du and E/S_E
   python scripts/calibrate/plot_cycle_energy_debug.py "${AMP_W_ARGS[@]}" --params results/calibration/individual_optimize/optimized_brb_parameters.csv
   # J_feat landmark markers on exp vs sim hysteresis
-  python scripts/calibrate/plot_cycle_landmarks_debug.py "${AMP_W_ARGS[@]}" --params results/calibration/individual_optimize/optimized_brb_parameters.csv
+  # Always --amplitude-weights so *_landmarks_exp.csv w_c matches J_feat (independent of USE_AMPLITUDE_WEIGHTS).
+  python scripts/calibrate/plot_cycle_landmarks_debug.py --amplitude-weights --params results/calibration/individual_optimize/optimized_brb_parameters.csv
 
   # --- Averaged vs generalized narrative report (default: results/calibration/averaged_vs_generalized_metrics_report.md) ---
   python scripts/calibrate/report_averaged_vs_generalized_metrics.py

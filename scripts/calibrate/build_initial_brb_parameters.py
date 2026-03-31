@@ -14,6 +14,10 @@ columns, then ``STEEL_DEFAULT["b_p"]`` / ``STEEL_DEFAULT["b_n"]``.
 
 The seed CSV must exist (default: ``config/calibration/steel_seed_sets.csv``; override ``--steel-seeds``).
 
+Optional ``config/calibration/set_id_optimize_params.csv`` does not affect this script; it only selects which
+SteelMPF columns later stages optimize. Resolved ``b_p`` / ``b_n`` in the output CSV are the starting values
+if those names appear in that file.
+
 Geometry and ``fyp`` / ``fyn`` come from the catalog.
 
 Run after ``resample_filtered.py`` and ``extract_bn_bp.py``.

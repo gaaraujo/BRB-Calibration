@@ -209,7 +209,8 @@ function Invoke-Pipeline {
 
   # --- Debug figures ---
   Invoke-Py scripts/calibrate/plot_cycle_energy_debug.py @script:AmplitudeWeightPyArgs --params results/calibration/individual_optimize/optimized_brb_parameters.csv
-  Invoke-Py scripts/calibrate/plot_cycle_landmarks_debug.py @script:AmplitudeWeightPyArgs --params results/calibration/individual_optimize/optimized_brb_parameters.csv
+  # Always --amplitude-weights so *_landmarks_exp.csv w_c matches J_feat (independent of $UseAmplitudeWeights).
+  Invoke-Py scripts/calibrate/plot_cycle_landmarks_debug.py --amplitude-weights --params results/calibration/individual_optimize/optimized_brb_parameters.csv
 
   # --- Averaged vs generalized narrative report (default: results/calibration/averaged_vs_generalized_metrics_report.md) ---
   Invoke-Py scripts/calibrate/report_averaged_vs_generalized_metrics.py
