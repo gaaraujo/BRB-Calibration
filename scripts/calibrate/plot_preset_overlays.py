@@ -1,6 +1,6 @@
 """
 Preset **combined** normalized overlays (``set{k}_combined_force_def_norm.png``) with fixed ``b_p`` /
-``b_n`` and steel from ``steel_seed_sets.csv``.
+``b_n`` and steel from ``set_id_settings.csv``.
 
 Writes numerical ``{Name}_set{k}_simulated.csv`` under ``results/calibration/individual_optimize/initial_params_simulated_force/``,
 a snapshot parameters CSV ``initial_params_overlay_parameters.csv``, then builds one montage per ``set_id``
@@ -8,7 +8,7 @@ a snapshot parameters CSV ``initial_params_overlay_parameters.csv``, then builds
 
 Typical (matches ``run.ps1`` / ``run.sh`` before L-BFGS)::
 
-    python scripts/calibrate/plot_preset_overlays.py --seeds steel_seed_sets.csv
+    python scripts/calibrate/plot_preset_overlays.py --set-id-settings config/calibration/set_id_settings.csv
 
 Or use an existing parameters CSV instead of rebuilding from seeds::
 
@@ -43,7 +43,7 @@ from calibrate.calibration_paths import (  # noqa: E402
     INITIAL_PARAMS_SIMULATED_FORCE_DIR,
     PLOTS_INDIVIDUAL_OPTIMIZE,
     PLOTS_INITIAL_PARAMS_OVERLAYS,
-    STEEL_SEED_SETS_CSV,
+    SET_ID_SETTINGS_CSV,
 )
 from calibrate.plot_compare_calibration_overlays import (  # noqa: E402
     _discover_simulated_index,
@@ -59,7 +59,7 @@ DEFAULT_PRESET_BN = 0.020
 
 def _params_from_seeds(
     *,
-    seeds_path: Path,
+    set_id_settings_path: Path,
     catalog_path: Path,
     bn_bp_path: Path,
 ) -> pd.DataFrame:
@@ -67,7 +67,7 @@ def _params_from_seeds(
         raise SystemExit(f"Missing {bn_bp_path}; run extract_bn_bp.py after resample_filtered.py.")
     catalog = pd.read_csv(catalog_path)
     bn_bp = pd.read_csv(bn_bp_path)
-    seeds = load_initial_brb_seeds(seeds_path)
+    seeds = load_initial_brb_seeds(set_id_settings_path)
     rows = build_initial_rows(catalog, bn_bp, seeds=seeds)
     if not rows:
         raise SystemExit("No rows after catalog merge; check BRB-Specimens.csv.")
@@ -79,16 +79,16 @@ def main() -> None:
     p = argparse.ArgumentParser(
         description=(
             "Preset combined normalized overlays (one PNG per set_id) with fixed b_p/b_n; "
-            "steel from --seeds or --params CSV."
+            "steel from --set-id-settings or --params CSV."
         ),
     )
     p.add_argument(
-        "--seeds",
+        "--set-id-settings",
         type=Path,
-        default=STEEL_SEED_SETS_CSV,
+        default=SET_ID_SETTINGS_CSV,
         help=(
-            "steel_seed_sets.csv (ignored if --params is set). "
-            f"Default: {STEEL_SEED_SETS_CSV}."
+            "set_id_settings.csv (ignored if --params is set). "
+            f"Default: {SET_ID_SETTINGS_CSV}."
         ),
     )
     p.add_argument(
@@ -96,7 +96,7 @@ def main() -> None:
         type=Path,
         default=None,
         help=(
-            "Optional: use this parameters CSV instead of rebuilding from --seeds "
+            "Optional: use this parameters CSV instead of rebuilding from --set-id-settings "
             "(e.g. results/calibration/individual_optimize/initial_brb_parameters.csv)."
         ),
     )
@@ -104,13 +104,13 @@ def main() -> None:
         "--catalog",
         type=Path,
         default=CATALOG_PATH,
-        help="BRB-Specimens.csv (only used when building from --seeds).",
+        help="BRB-Specimens.csv (only used when building from --set-id-settings).",
     )
     p.add_argument(
         "--bn-bp",
         type=Path,
         default=DEFAULT_BN_BP_PATH,
-        help="specimen_apparent_bn_bp.csv from extract_bn_bp.py (only used with --seeds).",
+        help="specimen_apparent_bn_bp.csv from extract_bn_bp.py (only used with --set-id-settings).",
     )
     p.add_argument(
         "--override-bp",
@@ -156,18 +156,18 @@ def main() -> None:
         label = params_path
         print(f"Parameters from {params_path}")
     else:
-        seeds_path = Path(args.seeds).expanduser().resolve()
-        if not seeds_path.is_file():
-            raise SystemExit(f"Steel seed CSV not found: {seeds_path}")
+        settings_path = Path(args.set_id_settings).expanduser().resolve()
+        if not settings_path.is_file():
+            raise SystemExit(f"set_id settings CSV not found: {settings_path}")
         catalog_path = Path(args.catalog).expanduser().resolve()
         bn_bp_path = Path(args.bn_bp).expanduser().resolve()
-        print(f"Building parameters from seeds: {seeds_path}")
+        print(f"Building parameters from set_id settings: {settings_path}")
         params_df = _params_from_seeds(
-            seeds_path=seeds_path,
+            set_id_settings_path=settings_path,
             catalog_path=catalog_path,
             bn_bp_path=bn_bp_path,
         )
-        label = f"{seeds_path} (built)"
+        label = f"{settings_path} (built)"
 
     obp = float(args.override_bp)
     obn = float(args.override_bn)

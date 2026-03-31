@@ -2,9 +2,8 @@
 Generalized optimization of shared steel parameters across specimens (per set_id or global).
 
 Default optimized columns come from ``params_to_optimize.PARAMS_TO_OPTIMIZE``. Optional
-``config/calibration/set_id_optimize_params.csv`` overrides the list per ``set_id`` (see
-``set_id_optimize_params``). Pooled mode (``--no-by-set-id``) requires every training ``set_id`` to
-resolve to the same list when that CSV is present.
+``config/calibration/set_id_settings.csv`` can override the list per ``set_id``. Pooled mode
+(``--no-by-set-id``) requires every training ``set_id`` to resolve to the same list when that CSV is present.
 
 Minimizes the weighted mean of per-row J_total (same landmark + energy loss as
 optimize_brb_mse). Specimen weights: ``generalized_weight`` on path-ordered rows (see
@@ -44,7 +43,7 @@ from calibrate.amplitude_mse_partition import (  # noqa: E402
 from calibrate.calibration_io import metrics_dataframe  # noqa: E402
 from calibrate.calibration_loss_settings import (  # noqa: E402
     CalibrationLossSettings,
-    load_calibration_loss_settings,
+    DEFAULT_CALIBRATION_LOSS_SETTINGS,
 )
 from calibrate.cycle_feature_loss import (  # noqa: E402
     deformation_scale_s_d,
@@ -89,14 +88,13 @@ from calibrate.averaged_params_lib import (  # noqa: E402
     merge_averaged_into_row,
 )
 from calibrate.calibration_paths import (  # noqa: E402
-    CALIBRATION_LOSS_SETTINGS_CSV,
     GENERALIZED_BRB_PARAMETERS_PATH,
     GENERALIZED_PARAMS_EVAL_METRICS_PATH,
     GENERALIZED_SET_ID_EVAL_SUMMARY_CSV,
     OPTIMIZED_BRB_PARAMETERS_PATH,
     PARAM_LIMITS_CSV,
     PLOTS_GENERALIZED_OPTIMIZE,
-    SET_ID_OPTIMIZE_PARAMS_CSV,
+    SET_ID_SETTINGS_CSV,
 )
 from calibrate.pipeline_log import kv, line, run_banner, saved_artifacts, section  # noqa: E402
 from calibrate.report_generalized_set_id_eval_summary import (  # noqa: E402
@@ -104,12 +102,14 @@ from calibrate.report_generalized_set_id_eval_summary import (  # noqa: E402
     write_generalized_unordered_j_split_summaries,
 )
 from calibrate.set_id_optimize_params import (  # noqa: E402
+    assert_global_loss_settings_consistent,
     build_param_cols_by_set_id_from_mapping,
-    load_set_id_optimize_params,
+    resolve_loss_settings_for_set_id,
     resolve_optimize_params_for_set_id,
     union_param_cols,
     unique_weighted_train_set_ids,
 )
+from calibrate.set_id_settings import load_set_id_optimize_and_loss  # noqa: E402
 from calibrate.specimen_weights import (  # noqa: E402
     catalog_metrics_fields,
     make_generalized_weight_fn,
@@ -144,6 +144,7 @@ class GeneralizedInstance:
     D_exp: np.ndarray
     F_exp: np.ndarray
     amp_meta: list[dict]
+    loss: CalibrationLossSettings
     p_y_ref: float
     s_d: float
     weight: float
@@ -154,8 +155,8 @@ def _collect_instances(
     available: list[str],
     weight_fn: Any,
     *,
-    loss: CalibrationLossSettings,
-    use_amplitude_weights: bool,
+    loss_by_set_id: dict[int, CalibrationLossSettings],
+    amplitude_weights_override: bool | None,
 ) -> list[GeneralizedInstance]:
     """Build GeneralizedInstance list from resampled force CSVs and params."""
     out: list[GeneralizedInstance] = []
@@ -170,14 +171,6 @@ def _collect_instances(
         F_exp = df["Force[kip]"].to_numpy(dtype=float)
         loaded = load_cycle_points_resampled(sid)
         points, _ = loaded if loaded is not None else find_cycle_points(df)
-        _mse_w, amp_meta = build_amplitude_weights(
-            D_exp,
-            points,
-            p=loss.amplitude_weight_power,
-            eps=loss.amplitude_weight_eps,
-            debug_partition=DEBUG_PARTITION,
-            use_amplitude_weights=use_amplitude_weights,
-        )
         s_d_ref = deformation_scale_s_d(D_exp)
         rows_for = params_df[params_df["Name"].astype(str) == sid]
         if rows_for.empty:
@@ -190,6 +183,20 @@ def _collect_instances(
         )
         w = float(weight_fn(sid))
         for _, prow in rows_for.iterrows():
+            loss = resolve_loss_settings_for_set_id(loss_by_set_id, prow.get("set_id"))
+            use_amp_w = (
+                bool(amplitude_weights_override)
+                if amplitude_weights_override is not None
+                else loss.use_amplitude_weights
+            )
+            _mse_w, amp_meta = build_amplitude_weights(
+                D_exp,
+                points,
+                p=loss.amplitude_weight_power,
+                eps=loss.amplitude_weight_eps,
+                debug_partition=DEBUG_PARTITION,
+                use_amplitude_weights=use_amp_w,
+            )
             out.append(
                 GeneralizedInstance(
                     name=sid,
@@ -198,6 +205,7 @@ def _collect_instances(
                     D_exp=D_exp,
                     F_exp=F_exp,
                     amp_meta=amp_meta,
+                    loss=loss,
                     p_y_ref=p_y_catalog,
                     s_d=s_d_ref,
                     weight=w,
@@ -214,7 +222,6 @@ def _generalized_objective_value(
     Ls: list[float],
     Us: list[float],
     *,
-    loss: CalibrationLossSettings,
     exp_landmark_cache: dict | None = None,
 ) -> float:
     """Weighted mean J over training instances at optimizer x."""
@@ -237,7 +244,7 @@ def _generalized_objective_value(
             F_sim,
             inst.amp_meta,
             s_d=inst.s_d,
-            loss=loss,
+            loss=inst.loss,
             fy_ksi=float(prow["fyp"]),
             a_sc=float(prow["A_sc"]),
             L_T=float(prow["L_T"]),
@@ -262,8 +269,6 @@ def _optimize_one_generalized_group(
     init_averaged: pd.Series,
     params_to_optimize: list[str],
     bounds_dict: dict[str, tuple[float, float]],
-    *,
-    loss: CalibrationLossSettings,
 ) -> tuple[pd.Series, Any]:
     """Return optimized generalized Series and scipy OptimizeResult."""
     rep = train[0].prow.copy()
@@ -285,7 +290,6 @@ def _optimize_one_generalized_group(
             use_norm,
             Ls,
             Us,
-            loss=loss,
             exp_landmark_cache=exp_landmark_cache,
         )
 
@@ -358,11 +362,6 @@ def main() -> None:
         _pl_rel = PARAM_LIMITS_CSV.relative_to(_PROJECT_ROOT)
     except ValueError:
         pass
-    _ls_rel = CALIBRATION_LOSS_SETTINGS_CSV
-    try:
-        _ls_rel = CALIBRATION_LOSS_SETTINGS_CSV.relative_to(_PROJECT_ROOT)
-    except ValueError:
-        pass
     p.add_argument(
         "--param-limits",
         type=Path,
@@ -373,50 +372,28 @@ def main() -> None:
         ),
     )
     p.add_argument(
-        "--loss-settings",
-        type=Path,
-        default=None,
-        help=(
-            "CSV: required w_feat_l2, w_energy_l2, use_amplitude_weights; optional w_feat_l1, "
-            "w_energy_l1, w_unordered_binenv_l2/l1, amplitude_weight_power / amplitude_weight_eps. "
-            f"Default: {_ls_rel}."
-        ),
-    )
-    p.add_argument(
         "--amplitude-weights",
         action=argparse.BooleanOptionalAction,
         default=None,
         help=AMPLITUDE_WEIGHTS_ARG_HELP,
     )
-    _so_rel = SET_ID_OPTIMIZE_PARAMS_CSV
+    _so_rel = SET_ID_SETTINGS_CSV
     try:
-        _so_rel = SET_ID_OPTIMIZE_PARAMS_CSV.relative_to(_PROJECT_ROOT)
+        _so_rel = SET_ID_SETTINGS_CSV.relative_to(_PROJECT_ROOT)
     except ValueError:
         pass
     p.add_argument(
-        "--set-id-optimize-params",
+        "--set-id-settings",
         type=Path,
         default=None,
         help=(
-            "Optional CSV: set_id, optimize_params (overrides PARAMS_TO_OPTIMIZE per set_id). "
+            "Per-set_id settings CSV (steel seeds + optimize_params + loss weights). "
             f"Default: {_so_rel}."
         ),
     )
     args = p.parse_args()
 
     run_banner("optimize_generalized_brb_mse.py")
-
-    loss_csv = (
-        Path(args.loss_settings).expanduser().resolve()
-        if args.loss_settings
-        else CALIBRATION_LOSS_SETTINGS_CSV
-    )
-    loss = load_calibration_loss_settings(loss_csv)
-    use_amp_w = (
-        bool(args.amplitude_weights)
-        if args.amplitude_weights is not None
-        else loss.use_amplitude_weights
-    )
 
     by_set_id = not args.no_by_set_id
     params_path = Path(args.params).expanduser().resolve()
@@ -461,12 +438,27 @@ def main() -> None:
         if not available_resampled:
             raise SystemExit("Generalized training requires resampled data for --specimen.")
 
+    default_list = list(PARAMS_TO_OPTIMIZE)
+    opt_csv = (
+        Path(args.set_id_settings).expanduser().resolve()
+        if args.set_id_settings
+        else SET_ID_SETTINGS_CSV
+    )
+    opt_map, loss_map = load_set_id_optimize_and_loss(opt_csv)
+    if opt_map or loss_map:
+        line(f"set_id settings CSV: {opt_csv}")
+    else:
+        line(
+            "set_id settings: (none) — using defaults: PARAMS_TO_OPTIMIZE and "
+            "DEFAULT_CALIBRATION_LOSS_SETTINGS"
+        )
+
     instances = _collect_instances(
         params_df,
         available_resampled,
         generalized_w_fn,
-        loss=loss,
-        use_amplitude_weights=use_amp_w,
+        loss_by_set_id=loss_map,
+        amplitude_weights_override=args.amplitude_weights,
     )
     if not instances:
         raise SystemExit("No generalized instances collected (check resampled data and params).")
@@ -474,21 +466,6 @@ def main() -> None:
     train_all = [i for i in instances if i.weight > 0.0]
     if not train_all:
         raise SystemExit("No training instances with positive specimen weight.")
-
-    default_list = list(PARAMS_TO_OPTIMIZE)
-    opt_csv = (
-        Path(args.set_id_optimize_params).expanduser().resolve()
-        if args.set_id_optimize_params
-        else SET_ID_OPTIMIZE_PARAMS_CSV
-    )
-    opt_map = load_set_id_optimize_params(opt_csv)
-    if opt_map:
-        line(f"set_id optimize params CSV: {opt_csv}")
-    else:
-        line(
-            "set_id optimize params: (none) — using PARAMS_TO_OPTIMIZE; "
-            f"optional {SET_ID_OPTIMIZE_PARAMS_CSV}"
-        )
 
     pool_set_ids = unique_weighted_train_set_ids(params_df, pooled_w_fn)
     bounds_cache: dict[tuple[str, ...], dict[str, tuple[float, float]]] = {}
@@ -502,6 +479,13 @@ def main() -> None:
     lim_path = Path(args.param_limits).expanduser().resolve() if args.param_limits else PARAM_LIMITS_CSV
     line(f"parameter limits: {lim_path}")
 
+    global_loss = (
+        assert_global_loss_settings_consistent(
+            loss_map, [inst.set_id for inst in train_all], DEFAULT_CALIBRATION_LOSS_SETTINGS
+        )
+        if (not by_set_id and loss_map)
+        else DEFAULT_CALIBRATION_LOSS_SETTINGS
+    )
     global_active = (
         assert_global_optimize_params_consistent(
             opt_map, [inst.set_id for inst in train_all], default_list
@@ -552,7 +536,6 @@ def main() -> None:
                 init_vec,
                 active,
                 _bounds_for_active(active),
-                loss=loss,
             )
             generalized_pool[sid_key] = opt_vec
             line(
@@ -570,7 +553,6 @@ def main() -> None:
             init_vec,
             global_active,
             _bounds_for_active(global_active),
-            loss=loss,
         )
         generalized_pool["_global"] = opt_vec
         line(
@@ -583,8 +565,14 @@ def main() -> None:
     if plots_dir_unordered.resolve() != plots_dir_ordered.resolve():
         kv("plots (digitized unordered)", str(plots_dir_unordered))
     kv("weights", repr(weight_tag))
-    kv("loss settings CSV", str(loss_csv))
-    kv("J_feat cycle weights", "amplitude" if use_amp_w else "uniform")
+    kv("loss settings", f"per-set via {SET_ID_SETTINGS_CSV.name}")
+    if args.amplitude_weights is None:
+        kv("J_feat cycle weights", "per-set (see CSV)")
+    else:
+        kv(
+            "J_feat cycle weights",
+            "amplitude (CLI override)" if bool(args.amplitude_weights) else "uniform (CLI override)",
+        )
 
     rows_out: list[dict[str, Any]] = []
 
@@ -633,13 +621,15 @@ def main() -> None:
             line(f"{sid} set {set_id}: length mismatch initial sim vs exp")
             continue
 
+        loss_here = inst.loss if by_set_id else global_loss
+
         bd_init = simulate_and_loss_breakdown(
             D_exp,
             F_exp,
             F_sim_init,
             amp_meta,
             s_d=inst.s_d,
-            loss=loss,
+            loss=loss_here,
             fy_ksi=float(eval_row_init["fyp"]),
             a_sc=float(eval_row_init["A_sc"]),
             L_T=float(eval_row_init["L_T"]),
@@ -671,7 +661,7 @@ def main() -> None:
             F_sim,
             amp_meta,
             s_d=inst.s_d,
-            loss=loss,
+            loss=loss_here,
             fy_ksi=float(eval_row["fyp"]),
             a_sc=float(eval_row["A_sc"]),
             L_T=float(eval_row["L_T"]),
@@ -688,8 +678,8 @@ def main() -> None:
         jtot = bd.j_total
         cloud_init = compute_unordered_cloud_metrics(D_exp, F_exp, D_exp, F_sim_init)
         cloud_final = compute_unordered_cloud_metrics(D_exp, F_exp, D_exp, F_sim)
-        mi = _metrics_dict_for_breakdown(bd_init, loss, "initial")
-        mf = _metrics_dict_for_breakdown(bd, loss, "final")
+        mi = _metrics_dict_for_breakdown(bd_init, loss_here, "initial")
+        mf = _metrics_dict_for_breakdown(bd, loss_here, "final")
 
         try:
             plot_force_def_overlays(

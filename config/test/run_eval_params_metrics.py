@@ -37,8 +37,8 @@ from calibrate.amplitude_mse_partition import (  # noqa: E402
     energy_scale_s_e,
 )
 from calibrate.calibration_io import metrics_dataframe  # noqa: E402
-from calibrate.calibration_loss_settings import load_calibration_loss_settings  # noqa: E402
-from calibrate.calibration_paths import CALIBRATION_LOSS_SETTINGS_CSV  # noqa: E402
+from calibrate.set_id_optimize_params import resolve_loss_settings_for_set_id  # noqa: E402
+from calibrate.set_id_settings import load_set_id_optimize_and_loss  # noqa: E402
 from calibrate.cycle_feature_loss import (  # noqa: E402
     deformation_scale_s_d,
     load_p_y_kip_catalog,
@@ -103,12 +103,6 @@ def main() -> None:
         ),
     )
     p.add_argument(
-        "--loss-settings",
-        type=Path,
-        default=None,
-        help=f"Loss weights CSV. Default: {CALIBRATION_LOSS_SETTINGS_CSV}",
-    )
-    p.add_argument(
         "--amplitude-weights",
         action=argparse.BooleanOptionalAction,
         default=None,
@@ -124,17 +118,7 @@ def main() -> None:
 
     params_path = Path(args.params).expanduser().resolve()
     out_dir = Path(args.out_dir).expanduser().resolve()
-    loss_csv = (
-        Path(args.loss_settings).expanduser().resolve()
-        if args.loss_settings
-        else CALIBRATION_LOSS_SETTINGS_CSV
-    )
-    loss = load_calibration_loss_settings(loss_csv)
-    use_amp_w = (
-        bool(args.amplitude_weights)
-        if args.amplitude_weights is not None
-        else loss.use_amplitude_weights
-    )
+    _opt_map, loss_map = load_set_id_optimize_and_loss(None)
 
     sim_dir = out_dir / "simulated_force"
     overlays_dir = out_dir / "overlays"
@@ -185,18 +169,9 @@ def main() -> None:
 
         loaded = load_cycle_points_resampled(sid)
         points, _segments = loaded if loaded is not None else find_cycle_points(df)
-        _mse_weights, amp_meta = build_amplitude_weights(
-            D_exp,
-            points,
-            p=loss.amplitude_weight_power,
-            eps=loss.amplitude_weight_eps,
-            debug_partition=DEBUG_PARTITION,
-            use_amplitude_weights=use_amp_w,
-        )
         s_f_ref = force_scale_s_f(F_exp)
         s_d_ref = deformation_scale_s_d(D_exp)
         s_e_ref = energy_scale_s_e(D_exp, F_exp)
-        n_cycles = len(amp_meta)
 
         p_y_catalog = load_p_y_kip_catalog(
             _PROJECT_ROOT,
@@ -206,6 +181,22 @@ def main() -> None:
         )
         cm = catalog_metrics_fields(sid, catalog_by_name)
         exp_landmark_cache: dict = {}
+
+        loss_here = resolve_loss_settings_for_set_id(loss_map, set_id)
+        use_amp_w = (
+            bool(args.amplitude_weights)
+            if args.amplitude_weights is not None
+            else loss_here.use_amplitude_weights
+        )
+        _mse_weights, amp_meta = build_amplitude_weights(
+            D_exp,
+            points,
+            p=loss_here.amplitude_weight_power,
+            eps=loss_here.amplitude_weight_eps,
+            debug_partition=DEBUG_PARTITION,
+            use_amplitude_weights=use_amp_w,
+        )
+        n_cycles = len(amp_meta)
 
         try:
             F_sim = np.asarray(run_simulation(D_exp, **_row_to_sim_params(prow)), dtype=float)
@@ -223,7 +214,7 @@ def main() -> None:
             F_sim,
             amp_meta,
             s_d=s_d_ref,
-            loss=loss,
+            loss=loss_here,
             fy_ksi=float(prow["fyp"]),
             a_sc=float(prow["A_sc"]),
             L_T=float(prow["L_T"]),
@@ -238,8 +229,8 @@ def main() -> None:
 
         jtot = bd.j_total
         cloud = compute_unordered_cloud_metrics(D_exp, F_exp, D_exp, F_sim)
-        mi = _metrics_dict_for_breakdown(bd, loss, "initial")
-        mf = _metrics_dict_for_breakdown(bd, loss, "final")
+        mi = _metrics_dict_for_breakdown(bd, loss_here, "initial")
+        mf = _metrics_dict_for_breakdown(bd, loss_here, "final")
 
         save_simulated_force_history_csv(
             sim_dir,

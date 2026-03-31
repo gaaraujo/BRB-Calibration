@@ -3,7 +3,7 @@ Weighted mean of steel parameters from a parameters CSV (default columns from
 ``params_to_optimize.PARAMS_TO_OPTIMIZE``), apply to every row, simulate, write parameters CSV +
 metrics CSV + hysteresis plots + NPZ and CSV force histories.
 
-Optional ``config/calibration/set_id_optimize_params.csv`` overrides which columns are averaged and
+Optional ``config/calibration/set_id_settings.csv`` overrides which columns are averaged and
 merged per ``set_id``. Pooled mode (``--no-by-set-id``) requires identical resolved lists across
 training ``set_id``s when that file is present.
 
@@ -42,7 +42,7 @@ from calibrate.amplitude_mse_partition import (  # noqa: E402
     energy_scale_s_e,
 )
 from calibrate.calibration_io import metrics_dataframe  # noqa: E402
-from calibrate.calibration_loss_settings import load_calibration_loss_settings  # noqa: E402
+from calibrate.calibration_loss_settings import DEFAULT_CALIBRATION_LOSS_SETTINGS  # noqa: E402
 from calibrate.cycle_feature_loss import (  # noqa: E402
     deformation_scale_s_d,
     load_p_y_kip_catalog,
@@ -83,19 +83,20 @@ from calibrate.averaged_params_lib import (  # noqa: E402
 from calibrate.calibration_paths import (  # noqa: E402
     AVERAGED_BRB_PARAMETERS_PATH,
     AVERAGED_PARAMS_EVAL_METRICS_PATH,
-    CALIBRATION_LOSS_SETTINGS_CSV,
     OPTIMIZED_BRB_PARAMETERS_PATH,
     PLOTS_AVERAGED_OPTIMIZE,
-    SET_ID_OPTIMIZE_PARAMS_CSV,
+    SET_ID_SETTINGS_CSV,
 )
 from calibrate.pipeline_log import kv, line, run_banner, saved_artifacts, section  # noqa: E402
 from calibrate.set_id_optimize_params import (  # noqa: E402
+    assert_global_loss_settings_consistent,
     build_param_cols_by_set_id_from_mapping,
-    load_set_id_optimize_params,
+    resolve_loss_settings_for_set_id,
     resolve_optimize_params_for_set_id,
     union_param_cols,
     unique_weighted_train_set_ids,
 )
+from calibrate.set_id_settings import load_set_id_optimize_and_loss  # noqa: E402
 from calibrate.specimen_weights import (  # noqa: E402
     catalog_metrics_fields,
     make_averaged_weight_fn,
@@ -172,56 +173,29 @@ def main() -> None:
         default=None,
         help="If set, only evaluate this Name (resampled and/or digitized unordered + param rows).",
     )
-    _ls_rel = CALIBRATION_LOSS_SETTINGS_CSV
-    try:
-        _ls_rel = CALIBRATION_LOSS_SETTINGS_CSV.relative_to(_PROJECT_ROOT)
-    except ValueError:
-        pass
-    p.add_argument(
-        "--loss-settings",
-        type=Path,
-        default=None,
-        help=(
-            "CSV: required w_feat_l2, w_energy_l2, use_amplitude_weights; optional w_feat_l1, "
-            "w_energy_l1, w_unordered_binenv_l2/l1, amplitude_weight_power / amplitude_weight_eps. "
-            f"Default: {_ls_rel}."
-        ),
-    )
     p.add_argument(
         "--amplitude-weights",
         action=argparse.BooleanOptionalAction,
         default=None,
         help=AMPLITUDE_WEIGHTS_ARG_HELP,
     )
-    _so_rel = SET_ID_OPTIMIZE_PARAMS_CSV
+    _so_rel = SET_ID_SETTINGS_CSV
     try:
-        _so_rel = SET_ID_OPTIMIZE_PARAMS_CSV.relative_to(_PROJECT_ROOT)
+        _so_rel = SET_ID_SETTINGS_CSV.relative_to(_PROJECT_ROOT)
     except ValueError:
         pass
     p.add_argument(
-        "--set-id-optimize-params",
+        "--set-id-settings",
         type=Path,
         default=None,
         help=(
-            "Optional CSV: set_id, optimize_params (overrides PARAMS_TO_OPTIMIZE per set_id). "
+            "Per-set_id settings CSV (steel seeds + optimize_params + loss weights). "
             f"Default: {_so_rel}."
         ),
     )
     args = p.parse_args()
 
     run_banner("eval_averaged_params.py")
-
-    loss_csv = (
-        Path(args.loss_settings).expanduser().resolve()
-        if args.loss_settings
-        else CALIBRATION_LOSS_SETTINGS_CSV
-    )
-    loss = load_calibration_loss_settings(loss_csv)
-    use_amp_w = (
-        bool(args.amplitude_weights)
-        if args.amplitude_weights is not None
-        else loss.use_amplitude_weights
-    )
 
     by_set_id = not args.no_by_set_id
     params_path = Path(args.params).expanduser().resolve()
@@ -245,11 +219,11 @@ def main() -> None:
 
     default_list = list(PARAMS_TO_OPTIMIZE)
     opt_csv = (
-        Path(args.set_id_optimize_params).expanduser().resolve()
-        if args.set_id_optimize_params
-        else SET_ID_OPTIMIZE_PARAMS_CSV
+        Path(args.set_id_settings).expanduser().resolve()
+        if args.set_id_settings
+        else SET_ID_SETTINGS_CSV
     )
-    opt_map = load_set_id_optimize_params(opt_csv)
+    opt_map, loss_map = load_set_id_optimize_and_loss(opt_csv)
     pool_set_ids = unique_weighted_train_set_ids(params_df, weight_fn)
     if by_set_id:
         param_cols_by_set_id = (
@@ -272,6 +246,13 @@ def main() -> None:
             assert_global_optimize_params_consistent(opt_map, train_set_ids, default_list)
             if opt_map
             else default_list
+        )
+        global_loss = (
+            assert_global_loss_settings_consistent(
+                loss_map, train_set_ids, DEFAULT_CALIBRATION_LOSS_SETTINGS
+            )
+            if loss_map
+            else DEFAULT_CALIBRATION_LOSS_SETTINGS
         )
         averaged_dict = compute_weighted_averaged_param_dict(
             params_df,
@@ -303,11 +284,17 @@ def main() -> None:
     if opt_map:
         kv("set_id optimize params CSV", str(opt_csv))
     else:
-        kv("set_id optimize params", f"(none); optional {SET_ID_OPTIMIZE_PARAMS_CSV}")
+        kv("set_id optimize params", f"(none); optional {SET_ID_SETTINGS_CSV}")
     kv("by_set_id", str(by_set_id))
     kv("weights", repr(weight_tag))
-    kv("loss settings CSV", str(loss_csv))
-    kv("J_feat cycle weights", "amplitude" if use_amp_w else "uniform")
+    kv("loss settings", f"per-set via {SET_ID_SETTINGS_CSV.name}")
+    if args.amplitude_weights is None:
+        kv("J_feat cycle weights", "per-set (see CSV)")
+    else:
+        kv(
+            "J_feat cycle weights",
+            "amplitude (CLI override)" if bool(args.amplitude_weights) else "uniform (CLI override)",
+        )
     kv("output parameters", str(out_params))
     kv("output metrics", str(out_metrics))
     kv("plots (path-ordered)", str(plots_dir_ordered))
@@ -331,18 +318,9 @@ def main() -> None:
         F_exp = df["Force[kip]"].to_numpy(dtype=float)
         loaded = load_cycle_points_resampled(sid)
         points, _ = loaded if loaded is not None else find_cycle_points(df)
-        _mse_weights, amp_meta = build_amplitude_weights(
-            D_exp,
-            points,
-            p=loss.amplitude_weight_power,
-            eps=loss.amplitude_weight_eps,
-            debug_partition=DEBUG_PARTITION,
-            use_amplitude_weights=use_amp_w,
-        )
         s_f_ref = force_scale_s_f(F_exp)
         s_d_ref = deformation_scale_s_d(D_exp)
         s_e_ref = energy_scale_s_e(D_exp, F_exp)
-        n_cycles = len(amp_meta)
 
         prow_block = params_df[params_df["Name"].astype(str) == sid]
         if prow_block.empty:
@@ -363,6 +341,25 @@ def main() -> None:
         for _, prow in prow_block.iterrows():
             set_id = prow.get("set_id", "?")
             contributes = specimen_w > 0.0
+            loss_here = (
+                resolve_loss_settings_for_set_id(loss_map, set_id)
+                if by_set_id
+                else global_loss
+            )
+            use_amp_w = (
+                bool(args.amplitude_weights)
+                if args.amplitude_weights is not None
+                else loss_here.use_amplitude_weights
+            )
+            _mse_weights, amp_meta = build_amplitude_weights(
+                D_exp,
+                points,
+                p=loss_here.amplitude_weight_power,
+                eps=loss_here.amplitude_weight_eps,
+                debug_partition=DEBUG_PARTITION,
+                use_amplitude_weights=use_amp_w,
+            )
+            n_cycles = len(amp_meta)
 
             try:
                 averaged_vec = get_averaged_for_set_id(averaged_dict, set_id, by_set_id=by_set_id)
@@ -392,7 +389,7 @@ def main() -> None:
                 F_sim,
                 amp_meta,
                 s_d=s_d_ref,
-                loss=loss,
+                loss=loss_here,
                 fy_ksi=float(eval_row["fyp"]),
                 a_sc=float(eval_row["A_sc"]),
                 L_T=float(eval_row["L_T"]),
@@ -407,8 +404,8 @@ def main() -> None:
 
             jtot = bd.j_total
             cloud = compute_unordered_cloud_metrics(D_exp, F_exp, D_exp, F_sim)
-            mi = _metrics_dict_for_breakdown(bd, loss, "initial")
-            mf = _metrics_dict_for_breakdown(bd, loss, "final")
+            mi = _metrics_dict_for_breakdown(bd, loss_here, "initial")
+            mf = _metrics_dict_for_breakdown(bd, loss_here, "final")
 
             try:
                 plot_force_def_overlays(

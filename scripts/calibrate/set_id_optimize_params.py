@@ -1,9 +1,6 @@
 """
 Per-``set_id`` lists of parameters optimized by L-BFGS-B (individual / generalized / averaged eval).
 
-Default path: ``calibration_paths.SET_ID_OPTIMIZE_PARAMS_CSV``. If the file is missing or a ``set_id``
-has no row, callers fall back to ``params_to_optimize.PARAMS_TO_OPTIMIZE``.
-
 ``optimize_params`` cells split on **commas** first; each segment is normalized (lowercase; underscores
 and spaces removed) as a **whole**, so ``c r 1`` and ``c_r_1`` map to ``cR1``. If the whole segment
 does not match, the segment is split on whitespace and each piece is normalized (so ``R0 cR1`` in one
@@ -14,13 +11,17 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable
-from pathlib import Path
 
 import pandas as pd
 
-from calibrate.calibration_paths import SET_ID_OPTIMIZE_PARAMS_CSV
+from calibrate.calibration_loss_settings import (
+    CalibrationLossSettings,
+    DEFAULT_CALIBRATION_LOSS_SETTINGS,
+    calibration_loss_settings_from_partial_dict,
+)
+from calibrate.calibration_paths import SET_ID_SETTINGS_CSV
 
-# Keys accepted in set_id_optimize_params.csv (subset of SteelMPF / geometry passed to run_simulation).
+# Keys accepted in optimize_params cells (subset of SteelMPF / geometry passed to run_simulation).
 OPTIMIZABLE_SIM_PARAM_NAMES: frozenset[str] = frozenset(
     (
         "L_T",
@@ -116,43 +117,17 @@ def _parse_optimize_params_cell(raw: object, *, path: Path, set_id: int) -> list
     return out
 
 
-def load_set_id_optimize_params(path: Path | None = None) -> dict[int, list[str]]:
-    """
-    Read ``set_id``, ``optimize_params`` from CSV (``#`` comment lines skipped).
-
-    Returns empty dict if the file is missing. Raises on duplicate ``set_id`` or invalid rows.
-    """
-    csv_path = Path(path).expanduser().resolve() if path is not None else SET_ID_OPTIMIZE_PARAMS_CSV
-    if not csv_path.is_file():
-        return {}
-    df = pd.read_csv(csv_path, comment="#")
-    if df.empty:
-        return {}
-    cols = {str(c).strip().lower(): c for c in df.columns}
-    if "set_id" not in cols:
-        raise ValueError(
-            f"{csv_path}: expected column 'set_id'; got {list(df.columns)}"
-        )
-    opt_key = None
-    for key in ("optimize_params", "params_to_optimize", "optimize"):
-        if key in cols:
-            opt_key = cols[key]
-            break
-    if opt_key is None:
-        raise ValueError(
-            f"{csv_path}: expected column 'optimize_params' (or params_to_optimize); got {list(df.columns)}"
-        )
-    sid_col = cols["set_id"]
-    out: dict[int, list[str]] = {}
-    for idx, row in df.iterrows():
-        sid_raw = row[sid_col]
-        if pd.isna(sid_raw):
-            raise ValueError(f"{csv_path}: row {idx}: missing set_id")
-        sid = int(sid_raw)
-        if sid in out:
-            raise ValueError(f"{csv_path}: duplicate set_id {sid}")
-        out[sid] = _parse_optimize_params_cell(row[opt_key], path=csv_path, set_id=sid)
-    return out
+LOSS_SETTINGS_KEYS: tuple[str, ...] = (
+    "w_feat_l2",
+    "w_feat_l1",
+    "w_energy_l2",
+    "w_energy_l1",
+    "w_unordered_binenv_l2",
+    "w_unordered_binenv_l1",
+    "use_amplitude_weights",
+    "amplitude_weight_power",
+    "amplitude_weight_eps",
+)
 
 
 def resolve_optimize_params_for_set_id(
@@ -168,6 +143,21 @@ def resolve_optimize_params_for_set_id(
     except (ValueError, TypeError):
         return list(default)
     return list(mapping.get(sid, default))
+
+
+def resolve_loss_settings_for_set_id(
+    mapping: dict[int, CalibrationLossSettings],
+    set_id: object,
+    default: CalibrationLossSettings = DEFAULT_CALIBRATION_LOSS_SETTINGS,
+) -> CalibrationLossSettings:
+    """Return `mapping[int(set_id)]` if present, else `default`. Empty `mapping` always uses default."""
+    if not mapping:
+        return default
+    try:
+        sid = int(pd.to_numeric(set_id, errors="raise"))
+    except (ValueError, TypeError):
+        return default
+    return mapping.get(sid, default)
 
 
 def build_param_cols_by_set_id_from_mapping(
@@ -248,6 +238,35 @@ def assert_global_optimize_params_consistent(
         pretty = {str(k): list(v) for k, v in sorted(resolved.items())}
         raise SystemExit(
             "Global (pooled) mode requires identical optimize_params for every training set_id "
-            f"when {SET_ID_OPTIMIZE_PARAMS_CSV.name} is present; resolved lists differ: {pretty}"
+            f"when {SET_ID_SETTINGS_CSV.name} is present; resolved lists differ: {pretty}"
         )
     return list(next(iter(uniq))) if uniq else list(default)
+
+
+def assert_global_loss_settings_consistent(
+    mapping: dict[int, CalibrationLossSettings],
+    train_set_ids: list[object],
+    default: CalibrationLossSettings = DEFAULT_CALIBRATION_LOSS_SETTINGS,
+) -> CalibrationLossSettings:
+    """
+    For pooled / global mode: every training `set_id` must resolve to identical loss settings.
+
+    Raises `SystemExit` if the mapping yields more than one distinct setting object.
+    """
+    if not mapping or not train_set_ids:
+        return default
+    resolved: dict[int, CalibrationLossSettings] = {}
+    for sid_raw in set(train_set_ids):
+        try:
+            sid = int(pd.to_numeric(sid_raw, errors="raise"))
+        except (ValueError, TypeError):
+            continue
+        resolved[sid] = resolve_loss_settings_for_set_id(mapping, sid, default)
+    uniq = set(resolved.values())
+    if len(uniq) > 1:
+        pretty = {str(k): v for k, v in sorted(resolved.items())}
+        raise SystemExit(
+            "Global (pooled) mode requires identical loss settings for every training set_id "
+            f"when {SET_ID_SETTINGS_CSV.name} is present; resolved settings differ: {pretty}"
+        )
+    return next(iter(uniq)) if uniq else default

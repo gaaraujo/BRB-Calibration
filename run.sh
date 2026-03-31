@@ -54,18 +54,18 @@ run_pipeline_steps() {
   python scripts/postprocess/plot_specimens.py
 
   # --- Apparent b_n / b_p and geometry (exploratory) ---
-  # Apparent b_n, b_p from resampled experiments (incl. segment stats for steel_seed_sets.csv keywords)
+  # Apparent b_n, b_p from resampled experiments (incl. segment stats for set_id_settings.csv keywords)
   python scripts/calibrate/extract_bn_bp.py
-  # Requires repo-root steel_seed_sets.csv (one row per set_id: steel overrides + b_p/b_n as number or stat keyword)
+  # Requires repo-root config/calibration/set_id_settings.csv (one row per set_id: steel overrides + b_p/b_n as number or stat keyword)
   python scripts/calibrate/build_initial_brb_parameters.py
   # Hysteresis with fitted hardening slopes
   python scripts/calibrate/plot_b_slopes.py
   # Histograms and geometry scatter for b_n / b_p
   python scripts/calibrate/plot_b_histograms_and_scatter.py
 
-  # --- Preset sim vs exp overlays (fixed b_p, b_n before L-BFGS; steel from steel_seed_sets.csv) ---
+  # --- Preset sim vs exp overlays (fixed b_p, b_n before L-BFGS; steel from set_id_settings.csv) ---
   python scripts/calibrate/plot_preset_overlays.py --params results/calibration/individual_optimize/initial_brb_parameters.csv
-  # Alternative: --seeds steel_seed_sets.csv if you want plot_preset_overlays to rebuild from catalog + seeds instead of this CSV :)
+  # Alternative: --set-id-settings config/calibration/set_id_settings.csv if you want plot_preset_overlays to rebuild from catalog + settings instead of this CSV :)
 
   # --- SteelMPF calibration and sim vs exp overlays ---
   # SteelMPF calibration: J_feat (+ optional J_E); cycle-weight PNGs under plots/calibration/individual_optimize/cycle_weights/; *_metrics.csv and *_simulated_force/ next to --output.

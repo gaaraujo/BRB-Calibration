@@ -16,9 +16,8 @@ sys.path.insert(0, str(_SCRIPTS / "postprocess"))
 from calibrate.calibration_paths import (  # noqa: E402
     BRB_SPECIMENS_CSV,
     CALIBRATION_CONFIG_DIR,
-    CALIBRATION_LOSS_SETTINGS_CSV,
     PARAM_LIMITS_CSV,
-    STEEL_SEED_SETS_CSV,
+    SET_ID_SETTINGS_CSV,
 )
 
 _REPO_ROOT = CALIBRATION_CONFIG_DIR.parent.parent
@@ -86,9 +85,8 @@ def main() -> None:
 
     for csv_path in (
         BRB_SPECIMENS_CSV,
-        STEEL_SEED_SETS_CSV,
         PARAM_LIMITS_CSV,
-        CALIBRATION_LOSS_SETTINGS_CSV,
+        SET_ID_SETTINGS_CSV,
     ):
         _print_table(csv_path, n)
 

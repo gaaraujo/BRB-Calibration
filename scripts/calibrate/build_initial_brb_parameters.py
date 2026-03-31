@@ -2,8 +2,9 @@
 Build ``results/calibration/individual_optimize/initial_brb_parameters.csv`` from the specimen catalog and
 ``extract_bn_bp.py`` output.
 
-**SteelMPF** and apparent-**b** sourcing for each calibration ``set_id`` are read from ``config/calibration/steel_seed_sets.csv``,
-unless ``--steel-seeds`` points elsewhere.
+**SteelMPF** and apparent-**b** sourcing for each calibration ``set_id`` are read from
+``config/calibration/set_id_settings.csv`` (unified per-``set_id`` config), unless
+``--set-id-settings`` points elsewhere.
 
 One CSV row per calibration ``set_id``. Columns ``E``, ``R0``, ``cR1``, ``cR2``, ``a1``–``a4`` are optional steel
 overrides (blank → ``STEEL_DEFAULT``). Columns ``b_p`` and ``b_n`` are each either a **numeric** literal or a **stat
@@ -12,9 +13,9 @@ name** (case-insensitive) referencing ``specimen_apparent_bn_bp.csv``: ``median`
 ``b_p`` / ``b_n`` default to ``median``. When a stat is missing or non-finite, fallbacks use other apparent-$b$
 columns, then ``STEEL_DEFAULT["b_p"]`` / ``STEEL_DEFAULT["b_n"]``.
 
-The seed CSV must exist (default: ``config/calibration/steel_seed_sets.csv``; override ``--steel-seeds``).
+The settings CSV must exist (default: ``config/calibration/set_id_settings.csv``; override ``--set-id-settings``).
 
-Optional ``config/calibration/set_id_optimize_params.csv`` does not affect this script; it only selects which
+Optional per-set ``optimize_params`` in ``config/calibration/set_id_settings.csv`` does not affect this script; it only selects which
 SteelMPF columns later stages optimize. Resolved ``b_p`` / ``b_n`` in the output CSV are the starting values
 if those names appear in that file.
 
@@ -41,8 +42,9 @@ from calibrate.calibration_paths import (  # noqa: E402
     BRB_SPECIMENS_CSV,
     INITIAL_BRB_PARAMETERS_PATH,
     SPECIMEN_APPARENT_BN_BP_PATH,
-    STEEL_SEED_SETS_CSV,
+    SET_ID_SETTINGS_CSV,
 )
+from calibrate.set_id_settings import load_set_id_settings  # noqa: E402
 
 CATALOG_PATH = BRB_SPECIMENS_CSV
 DEFAULT_BN_BP_PATH = SPECIMEN_APPARENT_BN_BP_PATH
@@ -257,7 +259,7 @@ def _ensure_bn_bp_stat_columns(bn_bp: pd.DataFrame) -> pd.DataFrame:
 
 
 def _load_seeds(df: pd.DataFrame, path: Path) -> list[InitialBrbSeedRow]:
-    """Load steel_seed_sets.csv (skip comment lines)."""
+    """Load set_id_settings.csv seed fields (skip comment lines)."""
     df = df.copy()
     if "set_id" not in df.columns:
         raise ValueError(f"{path}: seed CSV must have column 'set_id' (one row per calibration set)")
@@ -292,8 +294,8 @@ def _load_seeds(df: pd.DataFrame, path: Path) -> list[InitialBrbSeedRow]:
 
 
 def load_initial_brb_seeds(path: Path) -> list[InitialBrbSeedRow]:
-    """Parse ``steel_seed_sets.csv`` into one ``InitialBrbSeedRow`` per calibration ``set_id``."""
-    df = pd.read_csv(path, comment="#")
+    """Parse ``set_id_settings.csv`` into one ``InitialBrbSeedRow`` per calibration ``set_id``."""
+    df = load_set_id_settings(path)
     return _load_seeds(df, path)
 
 
@@ -329,7 +331,7 @@ def build_initial_rows(
     """Assemble initial_brb_parameters rows from catalog and seeds."""
     _validate_steel_default(STEEL_DEFAULT)
     if not seeds:
-        raise ValueError("initial BRB seeds list is empty; add rows to steel_seed_sets.csv")
+        raise ValueError("initial BRB seeds list is empty; add rows to set_id_settings.csv")
     cat = catalog.copy()
     if "Name" not in cat.columns:
         raise ValueError("Catalog must have a Name column")
@@ -401,12 +403,12 @@ def main() -> None:
     )
     p.add_argument("--output", type=Path, default=DEFAULT_OUTPUT_PATH, help="initial_brb_parameters.csv path")
     p.add_argument(
-        "--steel-seeds",
+        "--set-id-settings",
         type=Path,
-        default=STEEL_SEED_SETS_CSV,
+        default=SET_ID_SETTINGS_CSV,
         help=(
-            "steel_seed_sets.csv: one row per set_id (steel overrides + b_p/b_n as number or "
-            "median/mean/q1/q3/min/max). Must exist. Default: config/calibration/steel_seed_sets.csv."
+            "set_id_settings.csv: one row per set_id (steel overrides + b_p/b_n as number or "
+            "median/mean/q1/q3/min/max). Must exist. Default: config/calibration/set_id_settings.csv."
         ),
     )
     args = p.parse_args()
@@ -417,7 +419,7 @@ def main() -> None:
         sys.exit(1)
     bn_bp = pd.read_csv(args.bn_bp)
 
-    seed_path = Path(args.steel_seeds).expanduser().resolve()
+    seed_path = Path(args.set_id_settings).expanduser().resolve()
     if not seed_path.is_file():
         print(f"Steel seed CSV not found: {seed_path}", file=sys.stderr)
         sys.exit(1)

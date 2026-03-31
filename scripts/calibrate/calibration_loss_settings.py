@@ -1,22 +1,15 @@
 """
-Load ``calibration_loss_settings.csv`` (objective weights for L1/L2 metric families and amplitude options).
+Calibration objective weights and cycle-weighting knobs.
 
-Default path: ``calibration_paths.CALIBRATION_LOSS_SETTINGS_CSV`` under ``config/calibration/``.
-Lines starting with ``#`` are ignored (CSV comments).
-
-**File layout**
-
-- **Transposed (recommended):** two columns ``setting,value`` — one row per parameter (easier to scan).
-- **Wide:** one header row with all setting names and one data row of values.
-
-**Objective**
+These settings define the weighted objective:
 
 .. code-block:: text
 
     J_total = Σ_k w_k * metric_k
 
-where each ``metric_k`` is a **raw** (unweighted) diagnostic; ``w_k`` are the ``w_*`` rows in the CSV
-(``w_feat_l2``, ``w_feat_l1``, ``w_energy_l2``, ``w_energy_l1``, ``w_unordered_binenv_l2``, ``w_unordered_binenv_l1``).
+where each ``metric_k`` is a **raw** (unweighted) diagnostic; ``w_k`` are the ``w_*`` weights
+(``w_feat_l2``, ``w_feat_l1``, ``w_energy_l2``, ``w_energy_l1``, ``w_unordered_binenv_l2``,
+``w_unordered_binenv_l1``).
 """
 from __future__ import annotations
 
@@ -25,6 +18,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from collections.abc import Mapping
 
 
 @dataclass(frozen=True)
@@ -55,7 +49,7 @@ DEFAULT_CALIBRATION_LOSS_SETTINGS = CalibrationLossSettings(
 )
 
 
-def _parse_bool_cell(v: object) -> bool:
+def parse_bool_cell(v: object) -> bool:
     if isinstance(v, bool):
         return v
     if isinstance(v, (int, float)) and not isinstance(v, bool):
@@ -81,6 +75,54 @@ def _parse_bool_cell(v: object) -> bool:
     if s in ("0", "false", "no", "n", "off", ""):
         return False
     raise ValueError(f"expected boolean-like value, got {v!r}")
+
+
+def calibration_loss_settings_from_partial_dict(
+    kv: Mapping[str, object] | None,
+    *,
+    default: CalibrationLossSettings = DEFAULT_CALIBRATION_LOSS_SETTINGS,
+) -> CalibrationLossSettings:
+    """
+    Build settings from a partial mapping of ``name -> value``.
+
+    Missing / NaN values fall back to ``default``. Intended for per-``set_id`` rows in
+    ``config/calibration/set_id_settings.csv`` where some columns may be left blank.
+    """
+    if not kv:
+        return default
+
+    def get_raw(key: str) -> object | None:
+        return kv.get(key.lower())
+
+    def opt_float(name: str, dflt: float) -> float:
+        v = get_raw(name)
+        if v is None:
+            return dflt
+        if isinstance(v, (float, np.floating)) and np.isnan(v):
+            return dflt
+        if pd.isna(v):
+            return dflt
+        return float(v)
+
+    def opt_bool(name: str, dflt: bool) -> bool:
+        v = get_raw(name)
+        if v is None:
+            return dflt
+        if pd.isna(v):
+            return dflt
+        return parse_bool_cell(v)
+
+    return CalibrationLossSettings(
+        w_feat_l2=opt_float("w_feat_l2", default.w_feat_l2),
+        w_feat_l1=opt_float("w_feat_l1", default.w_feat_l1),
+        w_energy_l2=opt_float("w_energy_l2", default.w_energy_l2),
+        w_energy_l1=opt_float("w_energy_l1", default.w_energy_l1),
+        w_unordered_binenv_l2=opt_float("w_unordered_binenv_l2", default.w_unordered_binenv_l2),
+        w_unordered_binenv_l1=opt_float("w_unordered_binenv_l1", default.w_unordered_binenv_l1),
+        use_amplitude_weights=opt_bool("use_amplitude_weights", default.use_amplitude_weights),
+        amplitude_weight_power=opt_float("amplitude_weight_power", default.amplitude_weight_power),
+        amplitude_weight_eps=opt_float("amplitude_weight_eps", default.amplitude_weight_eps),
+    )
 
 
 def _loss_settings_table_to_kv(df: pd.DataFrame) -> dict[str, object]:
@@ -162,7 +204,7 @@ def load_calibration_loss_settings(path: Path | None) -> CalibrationLossSettings
     uaw_raw = get_raw("use_amplitude_weights")
     if uaw_raw is None:
         raise ValueError(f"{path}: missing use_amplitude_weights (have keys {sorted(kv)!r})")
-    uaw = _parse_bool_cell(uaw_raw)
+    uaw = parse_bool_cell(uaw_raw)
     p = opt_float("amplitude_weight_power", DEFAULT_CALIBRATION_LOSS_SETTINGS.amplitude_weight_power)
     eps = opt_float("amplitude_weight_eps", DEFAULT_CALIBRATION_LOSS_SETTINGS.amplitude_weight_eps)
 

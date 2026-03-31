@@ -57,15 +57,15 @@ pip install -r requirements.txt
 
 ## System Overview
 
-Experimental CSVs under `data/raw/` are filtered, resampled, and converted into cycle metadata. Apparent hardening statistics and [`steel_seed_sets.csv`](config/calibration/steel_seed_sets.csv) define multiple `set_id` seeds. L-BFGS-B fits SteelMPF parameters per specimen, and **averaged** and **generalized** stages summarize behavior across the specimen set. Results are reported through metrics tables and overlay plots. Objective weights (`w_feat_l2`, `w_feat_l1`, `w_energy_l2`, `w_energy_l1`, `w_unordered_binenv_l2`, `w_unordered_binenv_l1`) and amplitude cycle weights are read from [`calibration_loss_settings.csv`](config/calibration/calibration_loss_settings.csv) unless overridden on the CLI.
+Experimental CSVs under `data/raw/` are filtered, resampled, and converted into cycle metadata. Apparent hardening statistics and [`set_id_settings.csv`](config/calibration/set_id_settings.csv) define multiple `set_id` seeds. L-BFGS-B fits SteelMPF parameters per specimen, and **averaged** and **generalized** stages summarize behavior across the specimen set. Results are reported through metrics tables and overlay plots. Objective weights (`w_feat_l2`, `w_feat_l1`, `w_energy_l2`, `w_energy_l1`, `w_unordered_binenv_l2`, `w_unordered_binenv_l1`) and amplitude cycle weights are defined **per `set_id`** in [`set_id_settings.csv`](config/calibration/set_id_settings.csv) (and can be globally overridden for cycle weights via `--amplitude-weights` / `--no-amplitude-weights`).
 
 ```mermaid
 flowchart LR
   subgraph inputs [Inputs]
     Cat[config/calibration/BRB-Specimens.csv]
-    Seeds[config/calibration/steel_seed_sets.csv]
+    Seeds[config/calibration/set_id_settings.csv]
     Limits[config/calibration/params_limits.csv]
-    Loss[config/calibration/calibration_loss_settings.csv]
+    SetCfg[config/calibration/set_id_settings.csv]
     Raw[data/raw]
   end
   Raw --> Post[Postprocess]
@@ -76,16 +76,16 @@ flowchart LR
   Seeds --> Init
   Init --> Indiv[individual_optimize]
   Limits --> Indiv
-  Loss --> Indiv
-  Loss --> Averaged[averaged_optimize]
-  Loss --> Generalized[generalized_optimize]
+  SetCfg --> Indiv
+  SetCfg --> Averaged[averaged_optimize]
+  SetCfg --> Generalized[generalized_optimize]
   Indiv --> Averaged
   Indiv --> Generalized
   Averaged --> Out[results and plots]
   Generalized --> Out
 ```
 
-The framework supports both **path-ordered** lab records and **digitized unordered** literature data (`experimental_layout`, `path_ordered` in the catalog). Calibration is sensitive to initial SteelMPF values, so the repo defines **several parallel seed rows** in [`steel_seed_sets.csv`](config/calibration/steel_seed_sets.csv) (one per `set_id`). After optimization, compare losses across `set_id` and treat the best seed for the specimen set as the recommended backbone. Aggregate loss and tables are summarized in [`scripts/calibrate/report_averaged_vs_generalized_metrics.py`](scripts/calibrate/report_averaged_vs_generalized_metrics.py).
+The framework supports both **path-ordered** lab records and **digitized unordered** literature data (`experimental_layout`, `path_ordered` in the catalog). Calibration is sensitive to initial SteelMPF values, so the repo defines **several parallel seed rows** in [`set_id_settings.csv`](config/calibration/set_id_settings.csv) (one per `set_id`). After optimization, compare losses across `set_id` and treat the best seed for the specimen set as the recommended backbone. Aggregate loss and tables are summarized in [`scripts/calibrate/report_averaged_vs_generalized_metrics.py`](scripts/calibrate/report_averaged_vs_generalized_metrics.py).
 
 ---
 
@@ -111,7 +111,7 @@ The images below are frozen snapshots (see [`docs/readme/README.txt`](docs/readm
 <p align="center">
 <img src="./docs/readme/04_individual_cycle_weights.png" alt="Cycles colored by assigned weight in individual optimization" height="420" />
 </p>
-<p align="center"><em>Figure 4. Cycles colored by assigned weight in individual optimization when amplitude weights are enabled in <code>config/calibration/calibration_loss_settings.csv</code> (or <code>--amplitude-weights</code>) (<code>optimize_brb_mse.py</code> → <code>results/plots/calibration/individual_optimize/cycle_weights/</code>).</em></p>
+<p align="center"><em>Figure 4. Cycles colored by assigned weight in individual optimization when amplitude weights are enabled in <code>config/calibration/set_id_settings.csv</code> (or <code>--amplitude-weights</code>) (<code>optimize_brb_mse.py</code> → <code>results/plots/calibration/individual_optimize/cycle_weights/</code>).</em></p>
 
 <p align="center">
 <img src="./docs/readme/05_individual_overlay_norm.png" alt="Experimental vs numerical force–deformation from individual optimization" height="420" />
@@ -153,9 +153,8 @@ BRB-Calibration/
 ├── config/
 │   ├── calibration/             # Calibration inputs (not raw experimental CSVs)
 │   │   ├── BRB-Specimens.csv
-│   │   ├── steel_seed_sets.csv
 │   │   ├── params_limits.csv
-│   │   └── calibration_loss_settings.csv  # objective weights (transposed setting,value or wide)
+│   │   └── set_id_settings.csv            # per-set_id: steel seeds + optimize_params + objective weights + amplitude cycle weights
 │   └── raw_trim_ranges.yaml     # Optional raw row trims
 ├── summary_statistics/          # Parameter summary MD/CSVs + generalized set_id eval rollup (generated)
 ├── docs/
@@ -168,10 +167,8 @@ BRB-Calibration/
 | File | Role |
 |------|------|
 | `config/calibration/BRB-Specimens.csv` | Geometry, layout flags, `individual_optimize`, `averaged_weight`, `generalized_weight`, … |
-| `config/calibration/steel_seed_sets.csv` | One row per `set_id`: steel columns + `b_p` / `b_n` as numbers or **median** / **mean** / **q1** / **q3** / **min** / **max** from apparent-$b$ stats |
 | `config/calibration/params_limits.csv` | Optional finite bounds per parameter (`parameter`, `lower`, `upper`); omitted parameters are unbounded |
-| `config/calibration/set_id_optimize_params.csv` | Optional `set_id` → `optimize_params` list (overrides `PARAMS_TO_OPTIMIZE` per set for individual / generalized / averaged eval); omit file or row to use `params_to_optimize.py` defaults |
-| `config/calibration/calibration_loss_settings.csv` | Transposed `setting,value` rows (or wide one-row): required `w_feat_l2`, `w_energy_l2`, `use_amplitude_weights`; optional `w_feat_l1`, `w_energy_l1`, `w_unordered_binenv_l2`, `w_unordered_binenv_l1`, `amplitude_weight_power`, `amplitude_weight_eps` |
+| `config/calibration/set_id_settings.csv` | One row per `set_id`: steel seeds (`E,R0,cR1,cR2,a1–a4,b_p,b_n`), `optimize_params`, and objective/amplitude settings (`w_*`, `use_amplitude_weights`, `amplitude_weight_*`). Leave blank to use defaults. |
 
 ---
 
@@ -236,7 +233,7 @@ Require $L_T, A_{\mathrm{sc}}, A_t > 0$ and $0 \leq L_y \leq L_T$; if $L_y = L_T
 
 SteelMPF takes tensile/compressive yield $(f_{yp}, f_{yn})$, initial modulus $E_0$, strain-hardening ratios $(b_p, b_n)$ in tension and compression, curvature parameters $(R_0, c_{R1}, c_{R2})$, and optional isotropic-hardening pairs $(a_1, a_2)$ and $(a_3, a_4)$ ([OpenSeesPy API](https://openseespydoc.readthedocs.io/en/latest/src/SteelMPF.html)).
 
-**Elastic and yield.** Nominal yield strengths $f_{yp}$ and $f_{yn}$ are usually taken from **coupon or component tests** (or catalog nominal values). **Young’s modulus** is fixed at **$E = 29{,}000\ \mathrm{ksi}$** (≈ **200 GPa**, ≈ $2.0\times 10^5\ \mathrm{MPa}$) in [`steel_seed_sets.csv`](config/calibration/steel_seed_sets.csv) and passed to `run_simulation()` as $E_0$.
+**Elastic and yield.** Nominal yield strengths $f_{yp}$ and $f_{yn}$ are usually taken from **coupon or component tests** (or catalog nominal values). **Young’s modulus** is fixed at **$E = 29{,}000\ \mathrm{ksi}$** (≈ **200 GPa**, ≈ $2.0\times 10^5\ \mathrm{MPa}$) in [`set_id_settings.csv`](config/calibration/set_id_settings.csv) and passed to `run_simulation()` as $E_0$.
 
 **Kinematic hardening ($b_p$, $b_n$).** In SteelMPF, $b_p$ and $b_n$ are the ratios of the **post-yield tangent** to $E$ in tension and compression (Menegotto–Pinto asymptotic slopes). In this workflow they are **not** free optimization variables for default runs: they are seeded from **apparent hardening** statistics per cycle (e.g. median / quartiles of segment slopes from the resampled experiment via `extract_bn_bp.py` and `build_initial_brb_parameters.py`), i.e. slopes inferred from the test record rather than held fixed at a single handbook value.
 
@@ -250,7 +247,7 @@ $$R = R_0\left(1 - c_{R1}\,\frac{\varepsilon_r}{c_{R2} + \varepsilon_r}\right)$$
 
 ### Parameters chosen for optimization
 
-With $f_{yp}$, $f_{yn}$, $E$, and apparent-$b$ seeds for $b_p$, $b_n$ fixed from data and seeds, the **remaining** SteelMPF degrees of freedom targeted by L-BFGS-B are the **Bauschinger / curvature** set $(R_0, c_{R1}, c_{R2})$ and the **isotropic** pair $(a_1, a_3)$ (with $a_2 = a_4 = 1$). The default active list is **`PARAMS_TO_OPTIMIZE`** in [`scripts/calibrate/params_to_optimize.py`](scripts/calibrate/params_to_optimize.py). Optional per-`set_id` overrides live in [`set_id_optimize_params.csv`](config/calibration/set_id_optimize_params.csv) (same allowlist; include $b_p$, $b_n$ there to optimize them using the numeric values already in `initial_brb_parameters.csv`).
+With $f_{yp}$, $f_{yn}$, $E$, and apparent-$b$ seeds for $b_p$, $b_n$ fixed from data and seeds, the **remaining** SteelMPF degrees of freedom targeted by L-BFGS-B are the **Bauschinger / curvature** set $(R_0, c_{R1}, c_{R2})$ and the **isotropic** pair $(a_1, a_3)$ (with $a_2 = a_4 = 1$). The default active list is **`PARAMS_TO_OPTIMIZE`** in [`scripts/calibrate/params_to_optimize.py`](scripts/calibrate/params_to_optimize.py). Optional per-`set_id` overrides live in [`set_id_settings.csv`](config/calibration/set_id_settings.csv) (same allowlist; include $b_p$, $b_n$ there to optimize them using the numeric values already in `initial_brb_parameters.csv`).
 
 ---
 
@@ -258,7 +255,7 @@ With $f_{yp}$, $f_{yn}$, $E$, and apparent-$b$ seeds for $b_p$, $b_n$ fixed from
 
 ### Identification Objective
 
-The optimizer minimizes $J_{\mathrm{total}}$, the weighted sum of raw **J_feat** (L2/L1), **J_E** (L2/L1), and **J_binenv** (L2/L1) from [`calibration_loss_settings.csv`](config/calibration/calibration_loss_settings.csv), subject to the model following the fixed resampled displacement sequence $\{u_i\}$.
+The optimizer minimizes $J_{\mathrm{total}}$, the weighted sum of raw **J_feat** (L2/L1), **J_E** (L2/L1), and **J_binenv** (L2/L1) from per-`set_id` settings in [`set_id_settings.csv`](config/calibration/set_id_settings.csv), subject to the model following the fixed resampled displacement sequence $\{u_i\}$.
 
 **Simulation.** `scripts/model/corotruss.py` (`run_simulation`): two-node corotational truss, SteelMPF, $\hat{E} = Q E$.
 
@@ -272,7 +269,7 @@ $$S_E = S_F\, S_D$$
 
 is used (see `energy_scale_s_e` in [`amplitude_mse_partition.py`](scripts/calibrate/amplitude_mse_partition.py)). Metrics CSVs store raw **J_feat**, **J_E**, and **J_binenv** (each L2/L1) plus **`J_total`**. **`initial_unordered_J_binenv`** / **`final_unordered_J_binenv`** and the L1 companions (see [`digitized_unordered_eval_lib.py`](scripts/calibrate/digitized_unordered_eval_lib.py)) implement **$J_{\mathrm{binenv}}$**: deformation bins; in each bin $F^{\mathrm{up}}=\max F$ and $F^{\mathrm{lo}}=\min F$ separately for experiment and simulation; the bin L2 error is $\tfrac12\bigl[((F^{\mathrm{up}}_{\mathrm{exp}}-F^{\mathrm{up}}_{\mathrm{num}})/S_F)^2+((F^{\mathrm{lo}}_{\mathrm{exp}}-F^{\mathrm{lo}}_{\mathrm{num}})/S_F)^2\bigr]$; **$J_{\mathrm{binenv}}$** is the mean over bins where both clouds have at least one point. **$J_{\mathrm{binenv,L1}}$** uses the same bins with an L1 upper/lower gap per bin. Proximity figures may still show one-sided nearest-neighbor links for visualization only; those distances are **not** written as metrics. Normalization uses $S_D=\max u-\min u$ and $S_F=\max F^{\mathrm{exp}}-\min F^{\mathrm{exp}}$ on the experimental series (or cloud for digitized unordered). Only terms with nonzero weights in the loss CSV contribute to **$J_{\mathrm{total}}$**.
 
-**Weight cycles.** The resampled record is split into **weight cycles** using sorted **zero-deformation** indices in the cycle JSON (`zero_def`): each cycle is an index span used for both losses. If there are no `zero_def` points, the whole record is one cycle. Amplitude $A_c$ per cycle drives **cycle weights** $w_c = (A_c/A_{\max})^p + \varepsilon$ when `use_amplitude_weights` is true in [`calibration_loss_settings.csv`](config/calibration/calibration_loss_settings.csv) (overridable with `--amplitude-weights` / `--no-amplitude-weights` on the optimize/eval CLIs); otherwise $w_c = 1$.
+**Weight cycles.** The resampled record is split into **weight cycles** using sorted **zero-deformation** indices in the cycle JSON (`zero_def`): each cycle is an index span used for both losses. If there are no `zero_def` points, the whole record is one cycle. Amplitude $A_c$ per cycle drives **cycle weights** $w_c = (A_c/A_{\max})^p + \varepsilon$ when `use_amplitude_weights` is true in [`set_id_settings.csv`](config/calibration/set_id_settings.csv) (overridable with `--amplitude-weights` / `--no-amplitude-weights` on the optimize/eval CLIs); otherwise $w_c = 1$.
 
 **Landmark loss $J_{\mathrm{feat}}$.** For each weight cycle $c$, the code builds up to **twelve** experimental landmarks on $(u,F^{\mathrm{exp}})$: first tension/compression yield using $F^{\mathrm{exp}} > f_y A_{\mathrm{sc}}$ and $F^{\mathrm{exp}} < -f_y A_{\mathrm{sc}}$ (no 1.1 factor), global max/min force, $F$ at $u=0$ on each yield-to-peak subpath (interpolated), two mid-$u$ points per side between yield, $u=0$, and peak, then $u$ at $F=0$ unloading after each peak (see [`cycle_feature_loss.py`](scripts/calibrate/cycle_feature_loss.py)). For **slots 1–10**, the simulation is compared at the **same experimental $u$** using squared normalized **force** error $(F^{\mathrm{sim}}-F^{\mathrm{exp}})^2/S_F^{\,2}$. For **slots 11–12**, squared normalized **displacement** error $(u^{\mathrm{sim}}-u^{\mathrm{exp}})^2/S_D^{\,2}$ at those unloadings. Averaging omits slots where either side is missing.
 
@@ -294,7 +291,7 @@ where $N_{\mathrm{cyc}}$ is the number of weight cycles. **Amplitude weights $w_
 
 **Role of $J_E$.** The primary motivation is to **match dissipated energy** cycle by cycle: hysteretic energy loss strongly affects **transient** response (damping-equivalent behavior, cumulative plastic work), so calibrating only on force–deformation landmarks can under-constrain energy unless a dedicated term is added. **Implementation detail:** $J_E$ uses **one scalar per weight cycle** (the trapezoidal $|\int F\,\mathrm{d}u|$), averaged **uniformly over cycles** without $w_c$, so the energy term is **not** inflated by whichever half-cycles happen to contain more resampled points—avoiding a sampling-density artifact that a naive pointwise sum would create. (Across specimens, averaged and generalized stages use separate **specimen** weights in `specimen_weights.py`; within one specimen, $J_E$ is uniform over cycles.)
 
-**Combined objective.** $J_{\mathrm{total}} = \sum_k w_k \, m_k$ for raw metrics $m_k \in \{\texttt{J\_feat}^{L2/L1}, \texttt{J\_E}^{L2/L1}, \texttt{J\_binenv}^{L2/L1}\}$ and matching weights $w_k$ in [`calibration_loss_settings.csv`](config/calibration/calibration_loss_settings.csv). Raw **J_E** is still computed for reporting when simulation succeeds even if its weights are zero.
+**Combined objective.** $J_{\mathrm{total}} = \sum_k w_k \, m_k$ for raw metrics $m_k \in \{\texttt{J\_feat}^{L2/L1}, \texttt{J\_E}^{L2/L1}, \texttt{J\_binenv}^{L2/L1}\}$ and matching weights $w_k` per `set_id` in [`set_id_settings.csv`](config/calibration/set_id_settings.csv). Raw **J_E** is still computed for reporting when simulation succeeds even if its weights are zero.
 
 **Optimizer.** L-BFGS-B (`scipy.optimize.minimize`); failed simulations receive a large penalty (`FAILURE_PENALTY`). Weights are read from the loss CSV (or defaults in `calibration_loss_settings.py`).
 
@@ -310,10 +307,10 @@ where $N_{\mathrm{cyc}}$ is the number of weight cycles. **Amplitude weights $w_
 ### Parameter Seeding and Initialization
 
 1. **`extract_bn_bp.py`** writes `results/calibration/specimen_apparent_bn_bp.csv` (segment statistics for path-ordered rows; unordered envelope means where applicable).
-2. **`build_initial_brb_parameters.py`** merges the catalog, apparent-$b$ stats, and **`steel_seed_sets.csv`** → `results/calibration/individual_optimize/initial_brb_parameters.csv`.
+2. **`build_initial_brb_parameters.py`** merges the catalog, apparent-$b$ stats, and **`set_id_settings.csv`** → `results/calibration/individual_optimize/initial_brb_parameters.csv`.
 3. **`params_limits.csv`** defines optional box limits; [`lbfgsb_reparam.py`](scripts/calibrate/lbfgsb_reparam.py) maps bounded parameters to $z \in [0,1]$.
 
-Each row of **`steel_seed_sets.csv`** defines one **`set_id`**. Running the full pipeline repeats individual (and downstream) evaluation for every `set_id` in that file. Because L-BFGS-B is sensitive to initial parameters, we explore several seeds and recommend the `set_id` with the best specimen-set loss after optimization (see [`report_averaged_vs_generalized_metrics.py`](scripts/calibrate/report_averaged_vs_generalized_metrics.py) for weighted `final_J_total` and best-overall `set_id` summaries).
+Each row of **`set_id_settings.csv`** defines one **`set_id`**. Running the full pipeline repeats individual (and downstream) evaluation for every `set_id` in that file. Because L-BFGS-B is sensitive to initial parameters, we explore several seeds and recommend the `set_id` with the best specimen-set loss after optimization (see [`report_averaged_vs_generalized_metrics.py`](scripts/calibrate/report_averaged_vs_generalized_metrics.py) for weighted `final_J_total` and best-overall `set_id` summaries).
 
 ### Individual Specimen Optimization
 
@@ -434,7 +431,7 @@ Run from the repo root in order if you prefer not to use `run.sh` / `run.ps1`:
 | 5 | `python scripts/calibrate/extract_bn_bp.py` | `specimen_apparent_bn_bp.csv` |
 | 6 | `python scripts/calibrate/build_initial_brb_parameters.py` | `initial_brb_parameters.csv` |
 | 7–8 | `plot_b_slopes.py`, `plot_b_histograms_and_scatter.py` | `results/plots/apparent_b/` |
-| 9 | `plot_preset_overlays.py --params results/calibration/individual_optimize/initial_brb_parameters.csv` (or `--seeds steel_seed_sets.csv`; combined montages only) | `overlays_initial_params/set*_combined_force_def_norm.png`, `initial_params_simulated_force/`, `initial_params_overlay_parameters.csv` |
+| 9 | `plot_preset_overlays.py --params results/calibration/individual_optimize/initial_brb_parameters.csv` (or `--set-id-settings config/calibration/set_id_settings.csv`; combined montages only) | `overlays_initial_params/set*_combined_force_def_norm.png`, `initial_params_simulated_force/`, `initial_params_overlay_parameters.csv` |
 | 10 | `python scripts/calibrate/optimize_brb_mse.py` | `calibration/individual_optimize/*`, cycle-weight plots |
 | 11 | `python scripts/calibrate/plot_params_vs_filtered.py` (optimized params) | `plots/calibration/individual_optimize/overlays/` |
 | 12 | `python scripts/calibrate/eval_averaged_params.py` (see above) | `calibration/averaged_optimize/*` |
@@ -454,7 +451,7 @@ Run from the repo root in order if you prefer not to use `run.sh` / `run.ps1`:
 | Path | Contents |
 |------|----------|
 | `calibration/specimen_apparent_bn_bp.csv` | Apparent $b_n$, $b_p$ (path-ordered: segment mean / median / quartiles / min-max; unordered: mean only) |
-| `calibration/individual_optimize/initial_brb_parameters.csv` | Catalog geometry + `fyp`/`fyn`; apparent $b$ and steel from `steel_seed_sets.csv` per `set_id` |
+| `calibration/individual_optimize/initial_brb_parameters.csv` | Catalog geometry + `fyp`/`fyn`; apparent $b$ and steel from `set_id_settings.csv` per `set_id` |
 | `calibration/individual_optimize/optimized_brb_parameters.csv` | Full specimen set × `set_id`; `PARAMS_TO_OPTIMIZE` are NaN for non-optimized rows |
 | `calibration/individual_optimize/optimized_brb_parameters_metrics.csv` | Per-specimen losses; placeholder rows for non-optimized specimens |
 | `calibration/individual_optimize/…/*_force_history.npz` | Simulated force histories (path-ordered, `individual_optimize=true`) |
@@ -514,7 +511,7 @@ Unzip at the repo root to restore paths. `MANIFEST.txt` inside the archive lists
 | `scripts/postprocess/specimen_catalog.py` | Catalog flags and resolved paths under `data/raw/{Name}/` |
 | `scripts/postprocess/load_raw.py` | Primary F–u load + trim |
 | `scripts/calibrate/extract_bn_bp.py` | Apparent $b_n$, $b_p$ table |
-| `scripts/calibrate/build_initial_brb_parameters.py` | Builds `initial_brb_parameters.csv` from catalog + apparent $b$ + `steel_seed_sets.csv` |
+| `scripts/calibrate/build_initial_brb_parameters.py` | Builds `initial_brb_parameters.csv` from catalog + apparent $b$ + `set_id_settings.csv` |
 | `scripts/calibrate/optimize_brb_mse.py` | Primary L-BFGS-B calibration |
 | `scripts/calibrate/plot_params_vs_filtered.py` | Sim vs resampled experiment overlays |
 | `scripts/calibrate/eval_averaged_params.py` | Weighted mean of parameters + evaluate all rows |
@@ -524,7 +521,7 @@ Unzip at the repo root to restore paths. `MANIFEST.txt` inside the archive lists
 | `scripts/calibrate/report_calibration_param_tables.py` | `PARAMS_TO_OPTIMIZE` by `set_id` (Markdown + CSV) |
 | `scripts/calibrate/report_averaged_vs_generalized_metrics.py` | Narrative comparison of averaged vs generalized and best `set_id` |
 | `archive_pipeline_outputs.sh` / `archive_pipeline_outputs.ps1` | Zip processed `data/*`, `results/plots`, `results/calibration`, and repo-root calibration summaries into `run_snapshots/` |
-| `scripts/calibrate/calibration_paths.py` | Default paths under `results/`; `STEEL_SEED_SETS_CSV`, `PARAM_LIMITS_CSV` |
+| `scripts/calibrate/calibration_paths.py` | Default paths under `results/`; `SET_ID_SETTINGS_CSV`, `PARAM_LIMITS_CSV` |
 | `scripts/calibrate/param_limits.py` | Load `params_limits.csv` for `bounds_dict_for(...)` |
 | `scripts/calibrate/calibration_io.py` | Shared metrics CSV column order |
 | `scripts/calibrate/lbfgsb_reparam.py` | Bounded parameter reparameterization to $z \in [0,1]$ |
@@ -539,7 +536,7 @@ Figures are 300 DPI unless noted in script constants.
 
 ## Optimizer Settings
 
-Settings in [`optimize_brb_mse.py`](scripts/calibrate/optimize_brb_mse.py) and [`calibration_loss_settings.csv`](config/calibration/calibration_loss_settings.csv):
+Settings in [`optimize_brb_mse.py`](scripts/calibrate/optimize_brb_mse.py) and [`set_id_settings.csv`](config/calibration/set_id_settings.csv):
 
 | Setting | Role |
 |---------|------|
@@ -559,7 +556,7 @@ Settings in [`optimize_brb_mse.py`](scripts/calibrate/optimize_brb_mse.py) and [
 
 | Term | Meaning |
 |------|---------|
-| `set_id` | Index of a row in `steel_seed_sets.csv`; defines one full seed pass through the calibration matrix |
+| `set_id` | Index of a row in `set_id_settings.csv`; defines one full seed pass through the calibration matrix |
 | Apparent $b_p$, $b_n$ | Segment-level slopes from experiment; **not** the same as optimized SteelMPF $b$ unless chosen as seeds |
 | Path-ordered | Continuous F–u path suitable for cycle landmarks and standard postprocess |
 | Unordered (digitized) | Digitized unordered F–u samples + separate deformation drive (`path_ordered=false`) |

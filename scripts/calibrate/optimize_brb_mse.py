@@ -6,7 +6,7 @@ Overview
 Given experimental deformation D_exp (resampled CSV) and force F_exp, the optimizer
 adjusts a subset of SteelMPF / BRB parameters (default ``PARAMS_TO_OPTIMIZE`` in
 ``params_to_optimize.py``, optionally overridden per ``set_id`` by
-``config/calibration/set_id_optimize_params.csv``). For each
+``config/calibration/set_id_settings.csv``). For each
 trial vector, the corotruss model runs with the same D_exp and returns simulated
 force F_sim (same length as F_exp).
 
@@ -19,8 +19,8 @@ yield-to-peak subpath, two mid-``D`` points per side, then ``D`` at ``F=0`` afte
 Slots 1--10 compare **force** at the experimental ``D`` on sim vs exp, normalized by ``S_F``.
 Slots 11--12 compare **displacement** at unload (``F=0`` after each peak), normalized by ``S_D``.
 Average squared error over contributing slots within each cycle, then cycle-weight by ``w_c``
-(from ``config/calibration/calibration_loss_settings.csv`` by default; override with
-``--amplitude-weights`` / ``--no-amplitude-weights``).
+(from per-``set_id`` settings in ``config/calibration/set_id_settings.csv`` by default;
+override with ``--amplitude-weights`` / ``--no-amplitude-weights``).
 
     S_D = max(D_exp) - min(D_exp),  S_F = max(F_exp) - min(F_exp)   (fallbacks 1)
 
@@ -40,7 +40,7 @@ Cycle weights ``w_c`` for ``J_feat`` default to 1 unless you pass ``--amplitude-
 Total
 -----
     J = weighted sum of active raw terms (``J_feat`` L2/L1, ``J_E`` L2/L1,
-    ``J_binenv`` L2/L1) using ``config/calibration/calibration_loss_settings.csv``.
+    ``J_binenv`` L2/L1) using per-``set_id`` weights in ``config/calibration/set_id_settings.csv``.
 
 Run metrics (initial/final **raw** ``J_feat`` / ``J_E`` / binenv L2 and L1,
 ``J_total``, scalings ``S_F``/``S_D``/``S_E``, and active ``W_*`` weights) are
@@ -105,22 +105,21 @@ from calibrate.calibration_io import metrics_dataframe  # noqa: E402
 from calibrate.calibration_loss_settings import (  # noqa: E402
     DEFAULT_CALIBRATION_LOSS_SETTINGS,
     CalibrationLossSettings,
-    load_calibration_loss_settings,
 )
 from calibrate.calibration_paths import (  # noqa: E402
-    CALIBRATION_LOSS_SETTINGS_CSV,
     INITIAL_BRB_PARAMETERS_PATH,
     OPTIMIZED_BRB_PARAMETERS_PATH,
     PARAM_LIMITS_CSV,
     PLOTS_INDIVIDUAL_OPTIMIZE,
-    SET_ID_OPTIMIZE_PARAMS_CSV,
+    SET_ID_SETTINGS_CSV,
 )
 from calibrate.param_limits import bounds_dict_for  # noqa: E402
 from calibrate.params_to_optimize import PARAMS_TO_OPTIMIZE  # noqa: E402
 from calibrate.set_id_optimize_params import (  # noqa: E402
-    load_set_id_optimize_params,
+    resolve_loss_settings_for_set_id,
     resolve_optimize_params_for_set_id,
 )
+from calibrate.set_id_settings import load_set_id_optimize_and_loss  # noqa: E402
 from calibrate.specimen_weights import catalog_metrics_fields, names_for_individual_optimize  # noqa: E402
 from calibrate.digitized_unordered_eval_lib import compute_unordered_binenv_metrics  # noqa: E402
 from calibrate.lbfgsb_reparam import (  # noqa: E402
@@ -158,11 +157,11 @@ plt.rcParams["savefig.facecolor"] = "white"
 
 # ----- Config (adjust as needed); see params_to_optimize.py for PARAMS_TO_OPTIMIZE -----
 
-# --- Cycle weights w_c for J_feat: default from ``config/calibration/calibration_loss_settings.csv``;
-# override with ``--amplitude-weights`` / ``--no-amplitude-weights``.
+# --- Cycle weights w_c for J_feat: per-set defaults from `set_id_settings.csv`;
+# override with `--amplitude-weights` / `--no-amplitude-weights`.
 AMPLITUDE_WEIGHTS_ARG_HELP = (
-    "Override calibration_loss_settings.csv: use amplitude-based cycle weights w_c for J_feat "
-    "(omit both --amplitude-weights and --no-amplitude-weights to use the CSV)."
+    "Override per-set loss settings: use amplitude-based cycle weights w_c for J_feat "
+    "(omit both --amplitude-weights and --no-amplitude-weights to use per-set CSV values)."
 )
 AMPLITUDE_WEIGHT_POWER = DEFAULT_CALIBRATION_LOSS_SETTINGS.amplitude_weight_power
 AMPLITUDE_WEIGHT_EPS = DEFAULT_CALIBRATION_LOSS_SETTINGS.amplitude_weight_eps
@@ -799,7 +798,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
             "Optimize BRB parameters: weighted sum of raw J_feat / J_E / J_binenv (L2/L1) "
-            "per config/calibration/calibration_loss_settings.csv unless overridden."
+            "per-set via config/calibration/set_id_settings.csv unless overridden."
         ),
     )
     parser.add_argument(
@@ -826,17 +825,12 @@ def main() -> None:
         help=(
             f"Initial BRB parameters CSV (Name, SteelMPF columns). Default: {_init_rel}. "
             "Regenerate with scripts/calibrate/build_initial_brb_parameters.py after extract_bn_bp.py "
-            "(calibration set_ids and b_p/b_n from config/calibration/steel_seed_sets.csv; see build_initial_brb_parameters.py)."
+            "(calibration set_ids and b_p/b_n from config/calibration/set_id_settings.csv; see build_initial_brb_parameters.py)."
         ),
     )
     _pl_rel = PARAM_LIMITS_CSV
     try:
         _pl_rel = PARAM_LIMITS_CSV.relative_to(_PROJECT_ROOT)
-    except ValueError:
-        pass
-    _ls_rel = CALIBRATION_LOSS_SETTINGS_CSV
-    try:
-        _ls_rel = CALIBRATION_LOSS_SETTINGS_CSV.relative_to(_PROJECT_ROOT)
     except ValueError:
         pass
     parser.add_argument(
@@ -848,28 +842,18 @@ def main() -> None:
             f"Default: {_pl_rel}."
         ),
     )
-    _sip_rel = SET_ID_OPTIMIZE_PARAMS_CSV
+    _sip_rel = SET_ID_SETTINGS_CSV
     try:
-        _sip_rel = SET_ID_OPTIMIZE_PARAMS_CSV.relative_to(_PROJECT_ROOT)
+        _sip_rel = SET_ID_SETTINGS_CSV.relative_to(_PROJECT_ROOT)
     except ValueError:
         pass
     parser.add_argument(
-        "--set-id-optimize-params",
+        "--set-id-settings",
         type=Path,
         default=None,
         help=(
-            "Optional CSV: set_id, optimize_params (comma-separated names). "
-            f"Default path if omitted: {_sip_rel}. If missing, use PARAMS_TO_OPTIMIZE for every set_id."
-        ),
-    )
-    parser.add_argument(
-        "--loss-settings",
-        type=Path,
-        default=None,
-        help=(
-            "CSV: required w_feat_l2, w_energy_l2, use_amplitude_weights; optional w_feat_l1, "
-            "w_energy_l1, w_unordered_binenv_l2/l1, amplitude_weight_power / amplitude_weight_eps. "
-            f"Default: {_ls_rel}."
+            "Per-set_id settings CSV (steel seeds + optimize_params + loss weights). "
+            f"Default path if omitted: {_sip_rel}."
         ),
     )
     parser.add_argument(
@@ -882,48 +866,35 @@ def main() -> None:
 
     out_path = Path(args.output) if args.output else OUTPUT_CSV
     initial_path = Path(args.initial_params).expanduser().resolve()
-    loss_csv = (
-        Path(args.loss_settings).expanduser().resolve()
-        if args.loss_settings
-        else CALIBRATION_LOSS_SETTINGS_CSV
-    )
-    loss = load_calibration_loss_settings(loss_csv)
-    use_amp_w = (
-        bool(args.amplitude_weights)
-        if args.amplitude_weights is not None
-        else loss.use_amplitude_weights
-    )
 
-    optimize_by_set_id = load_set_id_optimize_params(
-        Path(args.set_id_optimize_params).expanduser().resolve()
-        if args.set_id_optimize_params is not None
+    opt_csv_path = (
+        Path(args.set_id_settings).expanduser().resolve()
+        if args.set_id_settings is not None
         else None
     )
-    if optimize_by_set_id:
-        _sip_show = (
-            Path(args.set_id_optimize_params).expanduser().resolve()
-            if args.set_id_optimize_params is not None
-            else SET_ID_OPTIMIZE_PARAMS_CSV
-        )
-        print(f"Per-set_id optimize params CSV: {_sip_show}")
+    optimize_by_set_id, loss_by_set_id = load_set_id_optimize_and_loss(opt_csv_path)
+    if optimize_by_set_id or loss_by_set_id:
+        _sip_show = opt_csv_path if opt_csv_path is not None else SET_ID_SETTINGS_CSV
+        print(f"Per-set_id settings CSV: {_sip_show}")
     else:
         print(
-            "Per-set_id optimize params: (file missing or empty) — using "
-            f"PARAMS_TO_OPTIMIZE from params_to_optimize.py: {', '.join(PARAMS_TO_OPTIMIZE)}"
+            "Per-set_id settings: (file missing or empty) — using defaults: "
+            f"PARAMS_TO_OPTIMIZE={', '.join(PARAMS_TO_OPTIMIZE)}; "
+            "loss settings = DEFAULT_CALIBRATION_LOSS_SETTINGS"
         )
     print(f"Initial parameters CSV: {initial_path}")
     _limits_p = Path(args.param_limits).expanduser().resolve() if args.param_limits else PARAM_LIMITS_CSV
     print(f"Parameter limits CSV: {_limits_p}")
-    print(f"Loss settings CSV: {loss_csv}")
-    print(
-        "Loss reporting: raw J_feat (L2/L1), J_E (L2/L1), J_binenv (L2/L1); "
-        f"J_total = weighted sum (see loss CSV). w_feat_l2={loss.w_feat_l2:g}, "
-        f"w_energy_l2={loss.w_energy_l2:g}."
-    )
-    print(
-        "J_feat cycle weights: "
-        + ("amplitude w_c (same formula as build_amplitude_weights)" if use_amp_w else "uniform w_c=1")
-    )
+    print("Loss reporting: raw J_feat (L2/L1), J_E (L2/L1), J_binenv (L2/L1); J_total = weighted sum.")
+    if args.amplitude_weights is not None:
+        print(
+            "J_feat cycle weights: "
+            + (
+                "amplitude w_c (CLI override)"
+                if bool(args.amplitude_weights)
+                else "uniform w_c=1 (CLI override)"
+            )
+        )
 
     params_df = pd.read_csv(initial_path)
     if "Name" not in params_df.columns:
@@ -980,26 +951,15 @@ def main() -> None:
 
         D_exp = df["Deformation[in]"].to_numpy(dtype=float)
         F_exp = df["Force[kip]"].to_numpy(dtype=float)
-        n = len(D_exp)
 
         loaded = load_cycle_points_resampled(sid)
         if loaded is not None:
             points, _segments = loaded
         else:
             points, _segments = find_cycle_points(df)
-
-        mse_weights, amp_meta = build_amplitude_weights(
-            D_exp,
-            points,
-            p=loss.amplitude_weight_power,
-            eps=loss.amplitude_weight_eps,
-            debug_partition=DEBUG_PARTITION,
-            use_amplitude_weights=use_amp_w,
-        )
         s_f_ref = force_scale_s_f(F_exp)
         s_d_ref = deformation_scale_s_d(D_exp)
         s_e_ref = energy_scale_s_e(D_exp, F_exp)
-        n_cycles = len(amp_meta)
         rows_for_specimen = params_df[params_df["Name"].astype(str) == sid]
         if rows_for_specimen.empty:
             print(f"  Skipping {sid}: no row in {initial_path.name}")
@@ -1019,6 +979,20 @@ def main() -> None:
                     optimize_by_set_id,
                     prow.get("set_id"),
                     list(PARAMS_TO_OPTIMIZE),
+                )
+                loss = resolve_loss_settings_for_set_id(loss_by_set_id, prow.get("set_id"))
+                use_amp_w = (
+                    bool(args.amplitude_weights)
+                    if args.amplitude_weights is not None
+                    else loss.use_amplitude_weights
+                )
+                mse_weights, amp_meta = build_amplitude_weights(
+                    D_exp,
+                    points,
+                    p=loss.amplitude_weight_power,
+                    eps=loss.amplitude_weight_eps,
+                    debug_partition=DEBUG_PARTITION,
+                    use_amplitude_weights=use_amp_w,
                 )
                 bd_local = _bounds_for_active(active)
                 (

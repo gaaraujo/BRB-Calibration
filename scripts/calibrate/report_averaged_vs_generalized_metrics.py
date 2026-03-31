@@ -59,21 +59,19 @@ sys.path.insert(0, str(_SCRIPTS))
 
 
 
-from calibrate.calibration_loss_settings import load_calibration_loss_settings  # noqa: E402
 from calibrate.calibration_paths import (  # noqa: E402
     AVERAGED_BRB_PARAMETERS_PATH,
     AVERAGED_PARAMS_EVAL_METRICS_PATH,
     BRB_SPECIMENS_CSV,
-    CALIBRATION_LOSS_SETTINGS_CSV,
     GENERALIZED_BRB_PARAMETERS_PATH,
     GENERALIZED_PARAMS_EVAL_METRICS_PATH,
     OPTIMIZED_BRB_PARAMETERS_METRICS_PATH,
     OPTIMIZED_BRB_PARAMETERS_PATH,
     RESULTS_CALIBRATION,
-    STEEL_SEED_SETS_CSV,
+    SET_ID_SETTINGS_CSV,
 )
 
-_loss = load_calibration_loss_settings(CALIBRATION_LOSS_SETTINGS_CSV)
+from calibrate.calibration_loss_settings import DEFAULT_CALIBRATION_LOSS_SETTINGS  # noqa: E402
 
 
 
@@ -468,15 +466,19 @@ def _report_narrative_intro(specimens_path: Path, steel_seed_path: Path) -> list
     else:
         parts.append(f"*(Steel seed file not found: `{steel_seed_path}`)*")
     parts.append("")
-    wf2, we2 = _loss.w_feat_l2, _loss.w_energy_l2
+    wf2, we2 = (
+        DEFAULT_CALIBRATION_LOSS_SETTINGS.w_feat_l2,
+        DEFAULT_CALIBRATION_LOSS_SETTINGS.w_energy_l2,
+    )
     parts.append("## 3. Objective function")
     parts.append("")
     parts.append(
         f"The optimization target matches **`optimize_brb_mse`**: a weighted sum of **raw** metrics from "
-        f"``config/calibration/calibration_loss_settings.csv`` — cycle **landmark** error (**J_feat**, L2/L1), "
+        f"``config/calibration/set_id_settings.csv`` — per-``set_id`` objective weights for "
+        f"cycle **landmark** error (**J_feat**, L2/L1), "
         f"per-cycle **energy** mismatch (**J_E**, L2/L1), and **binned cloud** terms (**J_binenv**, L2/L1). "
         f"Cycle weights **w_c** for **J_feat** default to uniform 1 (**`--amplitude-weights`** uses amplitude-based **w_c**). "
-        f"Example L2 weights from the current loss CSV: **w_feat_l2** = {wf2:g}, **w_energy_l2** = {we2:g}. "
+        f"Default L2 weights: **w_feat_l2** = {wf2:g}, **w_energy_l2** = {we2:g}. "
         f"**final_J_total** is the weighted objective; metrics CSVs store the raw L2/L1 terms and **J_binenv**."
     )
     parts.append("")
@@ -649,10 +651,10 @@ def main() -> None:
         help="Specimen catalog for the metadata table in the report narrative",
     )
     ap.add_argument(
-        "--steel-seed-sets",
+        "--set-id-settings",
         type=Path,
-        default=STEEL_SEED_SETS_CSV,
-        help="Steel seed sets table for the report narrative",
+        default=SET_ID_SETTINGS_CSV,
+        help="Unified set_id settings table for the report narrative",
     )
 
     ap.add_argument(
@@ -774,7 +776,7 @@ def main() -> None:
 
     lines.append("")
 
-    lines.extend(_report_narrative_intro(args.specimens_csv, args.steel_seed_sets))
+    lines.extend(_report_narrative_intro(args.specimens_csv, args.set_id_settings))
 
     lines.append("## Inputs")
 
@@ -782,7 +784,7 @@ def main() -> None:
 
     lines.append(f"- Specimen catalog (narrative): `{args.specimens_csv.resolve()}`")
 
-    lines.append(f"- Steel seed sets (narrative): `{args.steel_seed_sets.resolve()}`")
+    lines.append(f"- set_id settings (narrative): `{args.set_id_settings.resolve()}`")
 
     lines.append(f"- Individual metrics: `{args.individual_metrics.resolve()}`")
 

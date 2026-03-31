@@ -174,14 +174,14 @@ function Invoke-Pipeline {
 
   # --- Apparent b_n / b_p and geometry (exploratory) ---
   Invoke-Py scripts/calibrate/extract_bn_bp.py
-  # Requires repo-root steel_seed_sets.csv (one row per set_id: steel overrides + b_p/b_n as number or stat keyword)
+  # Requires repo-root config/calibration/set_id_settings.csv (one row per set_id: steel overrides + b_p/b_n as number or stat keyword)
   Invoke-Py scripts/calibrate/build_initial_brb_parameters.py
   Invoke-Py scripts/calibrate/plot_b_slopes.py
   Invoke-Py scripts/calibrate/plot_b_histograms_and_scatter.py
 
-  # --- Preset sim vs exp overlays (fixed b_p, b_n before L-BFGS; steel from steel_seed_sets.csv) ---
+  # --- Preset sim vs exp overlays (fixed b_p, b_n before L-BFGS; steel from set_id_settings.csv) ---
   Invoke-Py scripts/calibrate/plot_preset_overlays.py --params results/calibration/individual_optimize/initial_brb_parameters.csv
-  # Alternative: --seeds steel_seed_sets.csv if you want plot_preset_overlays to rebuild from catalog + seeds instead of this CSV :)
+  # Alternative: --set-id-settings config/calibration/set_id_settings.csv if you want plot_preset_overlays to rebuild from catalog + settings instead of this CSV :)
 
   # --- SteelMPF calibration and sim vs exp overlays ---
   # L-BFGS box limits: config/calibration/params_limits.csv by default (override: --param-limits path)

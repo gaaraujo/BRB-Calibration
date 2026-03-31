@@ -41,9 +41,9 @@ flowchart LR
 | Goal | Where to change |
 |------|-----------------|
 | Add a specimen | `config/calibration/BRB-Specimens.csv` + place CSVs under `data/raw/{Name}/` (see root README) |
-| Steel + apparent $b$ seeds per `set_id` | `config/calibration/steel_seed_sets.csv` (`b_p`/`b_n` as number or median/mean/q1/q3/min/max); `--steel-seeds` on `build_initial_brb_parameters.py` (see root README) |
+| Steel + apparent $b$ seeds per `set_id` | `config/calibration/set_id_settings.csv` (`E,R0,cR1,cR2,a1–a4,b_p,b_n`; `b_p`/`b_n` as number or median/mean/q1/q3/min/max); `--set-id-settings` on `build_initial_brb_parameters.py` (see root README) |
 | L-BFGS box limits (`PARAMS_TO_OPTIMIZE`) | `config/calibration/params_limits.csv`; `--param-limits` on `optimize_brb_mse.py` / `optimize_generalized_brb_mse.py` (`calibrate/param_limits.py`) |
-| Landmark + energy objective weights, amplitude $w_c$ | `config/calibration/calibration_loss_settings.csv` (transposed `setting,value` or wide); `--loss-settings` / `--amplitude-weights` / `--no-amplitude-weights` on optimize and eval scripts |
+| Landmark + energy objective weights, amplitude $w_c$ | `config/calibration/set_id_settings.csv` (per `set_id` columns); `--amplitude-weights` / `--no-amplitude-weights` on optimize and eval scripts |
 | No Savitzky on path-ordered filtered series (or digitized unordered drive) | `skip_filter_resample` in `BRB-Specimens.csv` (`filter_force.py`); resampling still runs |
 | Optimize + averaged/generalized weights | `BRB-Specimens.csv` (`individual_optimize`, `averaged_weight`, `generalized_weight`) -- see `calibrate/specimen_weights.py` |
 | Objective (landmarks, energy, scales) | `calibrate/optimize_brb_mse.py`, `cycle_feature_loss.py`, `amplitude_mse_partition.py` |

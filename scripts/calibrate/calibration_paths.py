@@ -1,6 +1,6 @@
 """
 Default locations under ``results/calibration`` and ``results/plots/calibration``,
-plus calibration **input** CSVs under ``config/calibration/`` (catalog, seeds, limits, loss settings)
+plus calibration **input** CSVs under ``config/calibration/`` (catalog, seeds, limits, per-set settings)
 and **summary** artifacts under ``summary_statistics/`` (parameter tables, per-``set_id`` eval rollups).
 
 Import these instead of duplicating path strings across scripts.
@@ -12,13 +12,11 @@ from pathlib import Path
 _SCRIPT_DIR = Path(__file__).resolve().parent
 _PROJECT_ROOT = _SCRIPT_DIR.parent.parent
 
-# Catalog, seeds, limits, and loss weights (not under ``data/raw``).
+# Catalog, seeds, limits, and per-set settings (not under ``data/raw``).
 CALIBRATION_CONFIG_DIR = _PROJECT_ROOT / "config" / "calibration"
 BRB_SPECIMENS_CSV = CALIBRATION_CONFIG_DIR / "BRB-Specimens.csv"
-STEEL_SEED_SETS_CSV = CALIBRATION_CONFIG_DIR / "steel_seed_sets.csv"
 PARAM_LIMITS_CSV = CALIBRATION_CONFIG_DIR / "params_limits.csv"
-CALIBRATION_LOSS_SETTINGS_CSV = CALIBRATION_CONFIG_DIR / "calibration_loss_settings.csv"
-SET_ID_OPTIMIZE_PARAMS_CSV = CALIBRATION_CONFIG_DIR / "set_id_optimize_params.csv"
+SET_ID_SETTINGS_CSV = CALIBRATION_CONFIG_DIR / "set_id_settings.csv"
 
 # Human-readable / tabular summaries (not raw inputs or per-run metrics blobs).
 SUMMARY_STATISTICS_DIR = _PROJECT_ROOT / "summary_statistics"
