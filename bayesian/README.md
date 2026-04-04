@@ -183,8 +183,6 @@ with $n_c$ the number of contributing slots in that cycle (so extra active slots
 
    python scripts/compute_error_metrics.py
 
-   python scripts/compute_error_metrics.py --verify-rows --json
-
    ```
 
 
