@@ -121,6 +121,71 @@ def weighted_landmark_vector_experiment(
     return out
 
 
+def sum_w_c_contributing_cycles(
+    D: np.ndarray,
+    F_exp: np.ndarray,
+    meta: list[dict],
+    *,
+    fy: float,
+    a_sc: float,
+    dy: float | None,
+    s_f: float,
+    s_d: float,
+) -> float:
+    """
+    Sum of cycle weights ``w_c`` over cycles that emit at least one characteristic-point pair.
+
+    Matches the denominator in :math:`J_{\\mathrm{feat}}^{(2)}` when using rows built by
+    :func:`weighted_landmark_vector_experiment` / :func:`weighted_landmark_vector_model`.
+    """
+    D = np.asarray(D, dtype=float)
+    F_exp = np.asarray(F_exp, dtype=float)
+    total = 0.0
+    for m in meta:
+        s, e = int(m["start"]), int(m["end"])
+        w_c = float(m.get("w_c", 1.0))
+        if not np.isfinite(w_c) or w_c <= 0.0:
+            w_c = 1.0
+        if e <= s:
+            continue
+
+        le = extract_cycle_landmarks(D, F_exp, s, e, fy=fy, a_sc=a_sc, dy=dy)
+        ls, le_m, _ = pair_sim_cycle_landmarks(
+            D, F_exp, F_exp, s, e, le, fy=fy, a_sc=a_sc, geometry_f=F_exp
+        )
+        n_c = sum(
+            1
+            for slot in range(N_LANDMARK_SLOTS)
+            if _slot_error_combined_sq(le_m[slot], ls[slot], s_f, s_d) is not None
+        )
+        if n_c > 0:
+            total += w_c
+    return float(total)
+
+
+def jfeat_l2_squared(
+    calibration_row: np.ndarray,
+    prediction_row: np.ndarray,
+    sum_w_c: float,
+) -> float:
+    r"""
+    Characteristic-feature :math:`L_2` objective :math:`J_{\mathrm{feat}}^{(2)}` from weighted rows.
+
+    For ``calibration_data.csv`` and ``results.out`` produced by this package,
+    :math:`J_{\mathrm{feat}}^{(2)} = \|\mathbf{r} - \mathbf{c}\|_2^2 / \sum_c w_c` with the same
+    :math:`\sum_c w_c` as :func:`sum_w_c_contributing_cycles`.
+    """
+    if sum_w_c <= 0.0 or not math.isfinite(sum_w_c):
+        raise ValueError(f"sum_w_c must be finite and positive, got {sum_w_c}")
+    c = np.asarray(calibration_row, dtype=float).ravel()
+    r = np.asarray(prediction_row, dtype=float).ravel()
+    if c.shape != r.shape:
+        raise ValueError(f"length mismatch: calibration {c.size} vs prediction {r.size}")
+    if c.size % 2 != 0:
+        raise ValueError("expected even length (interleaved δ and P components per slot)")
+    return float(np.sum((r - c) ** 2) / sum_w_c)
+
+
 def build_landmark_feature_cache(
     D: np.ndarray,
     F_exp: np.ndarray,

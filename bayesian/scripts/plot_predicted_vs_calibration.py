@@ -43,7 +43,7 @@ TEXT_PT = 6
 # One sans-serif family for all text; mathtext uses matching DejaVu sans glyphs.
 _RC_PLOT = {
     "font.family": "sans-serif",
-    "font.sans-serif": ["DejaVu Sans", "Arial", "Helvetica", "sans-serif"],
+    "font.sans-serif": ["Arial", "Helvetica", "sans-serif"],
     "mathtext.fontset": "dejavusans",
     "axes.labelsize": TEXT_PT,
     "axes.titlesize": TEXT_PT,
@@ -54,7 +54,7 @@ _RC_PLOT = {
     "ytick.direction": "in",
 }
 
-NORM_STRAIN_LABEL = r"Axial strain, $\delta/L_y$ (%)"
+NORM_STRAIN_LABEL = r"Axial strain, $\delta/L_y$ [%]"
 NORM_FORCE_LABEL = r"Axial force, $P/\left(f_y A_{sc}\right)$"
 
 

@@ -678,3 +678,49 @@ def _slot_error_combined_sq(
     if ef is None and ed is None:
         return None
     return float((ef or 0.0) + (ed or 0.0))
+
+
+def _slot_error_force_l1(
+    p_exp: tuple[float, float] | None,
+    p_sim: tuple[float, float] | None,
+    s_f: float,
+) -> float | None:
+    if p_exp is None or p_sim is None:
+        return None
+    _, fe = p_exp
+    _, fs = p_sim
+    inv_f = 1.0 / s_f if s_f > 0.0 and math.isfinite(s_f) else 1.0
+    if not (np.isfinite(fe) and np.isfinite(fs)):
+        return None
+    return abs(fs - fe) * inv_f
+
+
+def _slot_error_disp_l1(
+    p_exp: tuple[float, float] | None,
+    p_sim: tuple[float, float] | None,
+    s_d: float,
+) -> float | None:
+    if p_exp is None or p_sim is None:
+        return None
+    de, _ = p_exp
+    ds, _ = p_sim
+    inv_d = 1.0 / s_d if s_d > 0.0 and math.isfinite(s_d) else 1.0
+    if not (np.isfinite(de) and np.isfinite(ds)):
+        return None
+    return abs(ds - de) * inv_d
+
+
+def _slot_error_combined_l1(
+    p_exp: tuple[float, float] | None,
+    p_sim: tuple[float, float] | None,
+    s_f: float,
+    s_d: float,
+) -> float | None:
+    """``|ΔF|/S_F + |ΔD|/S_D`` omitting any term whose inputs are non-finite."""
+    if p_exp is None or p_sim is None:
+        return None
+    ef = _slot_error_force_l1(p_exp, p_sim, s_f)
+    ed = _slot_error_disp_l1(p_exp, p_sim, s_d)
+    if ef is None and ed is None:
+        return None
+    return float((ef or 0.0) + (ed or 0.0))

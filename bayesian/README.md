@@ -26,11 +26,11 @@ This folder is self-contained: run everything from here with Python 3 and OpenSe
 
 - **`lib/`** — Python modules (characteristic-point / $J_{\mathrm{feat}}$ logic, specimen config, cycle I/O).
 
-- **`scripts/`** — CLI utilities (**`clear.py`** resets generated outputs, then setup, precompute, calibration row, overlay plot).
+- **`scripts/`** — CLI utilities (**`clear.py`** resets generated outputs, then setup, precompute, calibration row, overlay plots (**`plot_predicted_vs_calibration.py`**, **`plot_predicted_vs_calibration_by_cycle.py`**), **`compute_error_metrics.py`** for repo-style metrics: $J_{\mathrm{feat}}$ (L2/L1), $J_E$, $J_{\mathrm{binenv}}$, scales, and $\sum w_c$ for contributing cycles).
 
 
 
-Root artifacts used by the workflow / UQ: **`calibration_data.csv`**, **`results.out`**, **`predicted_force.csv`**, **`predicted_vs_calibration.png`** (when you run the plot script).
+Root artifacts used by the workflow / UQ: **`calibration_data.csv`**, **`results.out`**, **`predicted_force.csv`**, **`predicted_vs_calibration.png`** / **`predicted_vs_calibration_by_cycle.png`** (when you run the plot scripts).
 
 
 
@@ -64,7 +64,7 @@ where $\delta_c^{\max}$ is the maximum absolute deformation reached in cycle $c$
 
 $$\sqrt{\frac{w_c}{n_c}}\,\frac{\delta}{S_\delta} \quad\text{and}\quad \sqrt{\frac{w_c}{n_c}}\,\frac{P}{S_P},$$
 
-with $n_c$ the number of contributing slots in that cycle (so extra active slots in a cycle do not automatically overweight it). That row feeds **`defaultLogLikeScript.py`** as `calibrationData` and `prediction`.
+with $n_c$ the number of contributing slots in that cycle (so extra active slots in a cycle do not automatically overweight it). That row feeds **`defaultLogLikeScript.py`** as `calibrationData` and `prediction`. For the $L_2$ objective, $J_{\mathrm{feat}}^{(2)} = \|\mathbf{r}-\mathbf{c}\|_2^2 / \sum_c w_c$ (same $\sum_c w_c$ as cycles with at least one contributing slot). Run **`python scripts/compute_error_metrics.py`** from the `bayesian/` root for full metrics on **`predicted_force.csv`** (and optional **`--verify-rows`** against `calibration_data.csv` / **`results.out`**).
 
 
 
@@ -163,6 +163,33 @@ with $n_c$ the number of contributing slots in that cycle (so extra active slots
    python scripts/plot_predicted_vs_calibration.py -o predicted_vs_calibration.png
 
    ```
+
+   **Per-cycle panels** (same run + ``predicted_force.csv``, one subplot per ``cycle_meta`` span; **shared** normalized $\delta/L_y$ and $P/(f_y A_{sc})$ limits over the full trace, like the single-panel figure). Shaded **red** / **blue** between curves where numerical force is above / below experimental (same index along the path). Layout is **4 columns** with enough rows to fit all weight cycles.
+
+   
+   ```bash
+
+   python scripts/plot_predicted_vs_calibration_by_cycle.py -o predicted_vs_calibration_by_cycle.png
+
+   ```
+
+
+
+7. **Error metrics** — *optional QC* — after **`predicted_force.csv`** exists:
+
+
+
+   ```bash
+
+   python scripts/compute_error_metrics.py
+
+   python scripts/compute_error_metrics.py --verify-rows --json
+
+   ```
+
+
+
+   By default, **`compute_error_metrics.py`** also prints a **per-cycle metrics table** (``cycle_id``, ``delta`` [in], **strain [%]** = $100\,\delta_{\max}/L_y$, $w_c$, and per-cycle mean **$J_{\mathrm{feat}}$** L2/L1 and **$J_E$** L2/L1 using the same global $S_E$ as the aggregate scalars) and includes the same as a **`cycles`** array when using **`--json`**. Use **`--no-cycle-table`** to omit it.
 
 
 

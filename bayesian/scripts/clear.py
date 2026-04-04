@@ -6,7 +6,7 @@ Deletes:
 - Paths from ``specimen_config.yaml`` ``paths.*``: ``cycle_meta``, ``target_displacement``,
   ``target_force``, ``landmark_cache``
 - Root outputs: ``calibration_data.csv``, ``results.out``, ``predicted_force.csv``,
-  ``predicted_vs_calibration.png``
+  ``predicted_vs_calibration.png``, ``predicted_vs_calibration_by_cycle.png``
 
 Does **not** delete inputs (e.g. ``data/force_deformation.csv``, cycle JSON, ``specimen_config.yaml``).
 
@@ -33,6 +33,7 @@ _ROOT_OUTPUT_NAMES = (
     "results.out",
     "predicted_force.csv",
     "predicted_vs_calibration.png",
+    "predicted_vs_calibration_by_cycle.png",
 )
 
 _PATH_KEYS = (
