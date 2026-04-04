@@ -48,6 +48,7 @@ BRB-Specimens.csv: specimen metadata, **where input CSVs live**, and who is in w
   ``deformation_history_png_path`` / ``force_deformation_png_path`` -- optional image paths (convention only).
   ``list_names_for_standard_pipeline`` / ``list_names_for_cycle_points`` / ``list_names_digitized_unordered``
     -- names that qualify for each step (see docstrings).
+  ``max_abs_strain_delta_over_Ly`` -- peak test strain ``max |δ| / L_y`` from resolved F--u (see ``resolve_force_deformation_csv_for_max_strain``).
 
 **Imports:** postprocess scripts add ``scripts/postprocess`` to ``sys.path`` and ``import specimen_catalog``.
 Calibration scripts usually insert ``postprocess`` the same way. Pass ``project_root`` when resolving
@@ -141,6 +142,69 @@ def resolve_resampled_force_deformation_csv(name: str, project_root: Path | None
         return p
     leg = root / "data" / "resampled" / f"{name}.csv"
     return leg if leg.is_file() else None
+
+
+def resolve_force_deformation_csv_for_max_strain(
+    name: str,
+    catalog: pd.DataFrame | None = None,
+    *,
+    project_root: Path | None = None,
+) -> Path | None:
+    """
+    F--u CSV for peak ``|δ|``: resampled (path-ordered), else filtered/raw, matching ``extract_bn_bp`` precedence.
+    """
+    root = project_root or PROJECT_ROOT
+    cat = catalog if catalog is not None else read_catalog()
+    rec = get_specimen_record(str(name), cat)
+    if uses_unordered_inputs(rec):
+        p = resolve_filtered_force_deformation_csv(str(name), root)
+        if p is not None and p.is_file():
+            return p
+        fu = force_deformation_unordered_csv_path(str(name), root)
+        return fu if fu.is_file() else None
+    pr = resolve_resampled_force_deformation_csv(str(name), root)
+    if pr is not None and pr.is_file():
+        return pr
+    pf = resolve_filtered_force_deformation_csv(str(name), root)
+    if pf is not None and pf.is_file():
+        return pf
+    prim = primary_f_u_csv_path(str(name), cat, project_root=root)
+    if prim is not None and prim.is_file():
+        return prim
+    return None
+
+
+def max_abs_strain_delta_over_Ly(
+    name: str,
+    catalog: pd.DataFrame | None = None,
+    *,
+    project_root: Path | None = None,
+    ly_in: float | None = None,
+) -> float | None:
+    """``max |Deformation[in]| / L_y`` (dimensionless) from the resolved experimental CSV."""
+    root = project_root or PROJECT_ROOT
+    cat = catalog if catalog is not None else read_catalog()
+    path = resolve_force_deformation_csv_for_max_strain(str(name), cat, project_root=root)
+    if path is None:
+        return None
+    row = cat[cat["Name"].astype(str) == str(name)]
+    if row.empty:
+        return None
+    if ly_in is None:
+        ly_in = float(row.iloc[0]["L_y_in"])
+    if ly_in <= 0 or not np.isfinite(ly_in):
+        return None
+    try:
+        df = pd.read_csv(path, usecols=[DEFORMATION_IN_COL])
+    except ValueError:
+        df = pd.read_csv(path)
+        if DEFORMATION_IN_COL not in df.columns:
+            return None
+    u = pd.to_numeric(df[DEFORMATION_IN_COL], errors="coerce").to_numpy(dtype=float)
+    u = u[np.isfinite(u)]
+    if u.size == 0:
+        return None
+    return float(np.max(np.abs(u)) / ly_in)
 
 
 def write_deformation_history_step_csv(path: Path, deformation_in, *, def_col_name: str | None = None) -> None:

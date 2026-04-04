@@ -91,20 +91,86 @@ def _b_linear_fit(
     kinit: float,
     L_y: float,
 ) -> float:
-    """Apparent Menegotto–Pinto ``b`` from slope of F vs u in normalized space (clipped)."""
+    """Apparent Menegotto–Pinto ``b`` from slope of F vs u in normalized space (clipped).
+
+    Robustified by iteratively removing the single worst residual point until the fitted
+    hardening ratio stabilizes:
+
+    - Fit F ≈ k u + c on the envelope vertices
+    - Remove the point with the largest |residual|
+    - Refit and recompute b = k/k_init
+    - Continue removing worst points while the change exceeds the threshold:
+        abs(log(b_new / b_old)) > log(1.5)
+    """
     if len(u) < 2 or kinit <= 0:
         return float("nan")
     min_range = MIN_DEF_RANGE_FRAC * L_y if L_y > 0 else MIN_DEF_RANGE_ABS_IN
     span = float(np.ptp(u))
     if span < min_range:
         return float("nan")
-    cov = float(np.cov(u, F)[0, 1])
-    var_u = float(np.var(u))
-    if var_u <= 1e-20:
+
+    u = np.asarray(u, dtype=float)
+    F = np.asarray(F, dtype=float)
+    m0 = np.isfinite(u) & np.isfinite(F)
+    u0, F0 = u[m0], F[m0]
+    if len(u0) < 2:
         return float("nan")
-    ksh = cov / var_u
-    b = ksh / kinit
-    return float(np.clip(b, B_CLIP[0], B_CLIP[1]))
+
+    def fit_slope_intercept(x: np.ndarray, y: np.ndarray) -> tuple[float, float] | None:
+        if len(x) < 2:
+            return None
+        var_u = float(np.var(x))
+        if var_u <= 1e-20:
+            return None
+        k = float(np.cov(x, y)[0, 1]) / var_u
+        c = float(np.mean(y) - k * np.mean(x))
+        return (k, c)
+
+    log_thresh = float(np.log(1.1))
+
+    # Work on mutable copies for iterative removal.
+    uu = np.asarray(u0, dtype=float)
+    ff = np.asarray(F0, dtype=float)
+
+    fit = fit_slope_intercept(uu, ff)
+    if fit is None:
+        return float("nan")
+    k, c = fit
+
+    def b_from_k(ksh: float) -> float:
+        b = float(ksh) / float(kinit)
+        return float(np.clip(b, B_CLIP[0], B_CLIP[1]))
+
+    b_old = b_from_k(float(k))
+    if not np.isfinite(b_old) or b_old <= 0.0:
+        return float("nan")
+
+    # Iteratively remove worst residual while b changes too much.
+    while len(uu) >= 3:
+        r = ff - (float(k) * uu + float(c))
+        if not np.all(np.isfinite(r)):
+            break
+        j = int(np.argmax(np.abs(r)))
+        uu = np.delete(uu, j)
+        ff = np.delete(ff, j)
+        if len(uu) < 2 or float(np.ptp(uu)) < min_range:
+            break
+        fit2 = fit_slope_intercept(uu, ff)
+        if fit2 is None:
+            break
+        k2, c2 = fit2
+        b_new = b_from_k(float(k2))
+        if not np.isfinite(b_new) or b_new <= 0.0:
+            break
+        if abs(float(np.log(b_new / b_old))) <= log_thresh:
+            k, c = k2, c2
+            b_old = b_new
+            break
+        # Keep the removal and continue; compare against the new fit next round.
+        k, c = k2, c2
+        b_old = b_new
+
+    return float(b_old)
 
 
 @dataclass(frozen=True)

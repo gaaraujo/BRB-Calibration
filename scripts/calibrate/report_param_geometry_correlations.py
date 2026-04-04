@@ -263,11 +263,13 @@ def _tidy_correlations(df: pd.DataFrame, *, geometry_cols: list[str], param_cols
     return out
 
 
-def _spearman_matrix(df: pd.DataFrame, *, geometry_cols: list[str], param_cols: list[str]) -> pd.DataFrame:
+def _corr_matrix(
+    df: pd.DataFrame, *, geometry_cols: list[str], param_cols: list[str], method: str
+) -> pd.DataFrame:
     mat = pd.DataFrame(index=param_cols, columns=geometry_cols, dtype=float)
     for p in param_cols:
         for g in geometry_cols:
-            v = df[[p, g]].corr(method="spearman", min_periods=2).iloc[0, 1]
+            v = df[[p, g]].corr(method=str(method), min_periods=2).iloc[0, 1]
             mat.loc[p, g] = float(v) if pd.notna(v) else np.nan
     return mat
 
@@ -282,11 +284,12 @@ def _pairwise_n_matrix(
     return nmat
 
 
-def _heatmap_spearman(
+def _heatmap_corr(
     mat: pd.DataFrame,
     *,
     out_path: Path,
     title: str,
+    cbar_label: str,
     n_mat: pd.DataFrame | None = None,
     x_label_map: dict[str, str] | None = None,
     y_label_map: dict[str, str] | None = None,
@@ -311,7 +314,7 @@ def _heatmap_spearman(
         ha="right",
     )
     cbar = fig.colorbar(im, ax=ax, shrink=0.9)
-    cbar.set_label("Spearman ρ")
+    cbar.set_label(cbar_label)
     # Annotate with rho only, or rho + n (extended).
     for i in range(mat.shape[0]):
         for j in range(mat.shape[1]):
@@ -329,12 +332,14 @@ def _heatmap_spearman(
     fig.savefig(out_path, dpi=200)
     plt.close(fig)
 
+
 def _combined_train_heatmap(
     mat_pg: pd.DataFrame,
     mat_pp: pd.DataFrame,
     *,
     out_path: Path,
     title: str,
+    cbar_label: str,
     n_pg: pd.DataFrame | None = None,
     n_pp: pd.DataFrame | None = None,
 ) -> None:
@@ -359,7 +364,8 @@ def _combined_train_heatmap(
     fig_h = max(6.0, 0.5 * combined.shape[0] + 2.0)
     fig, ax = plt.subplots(figsize=(fig_w, fig_h), layout="constrained")
     im = ax.imshow(z, vmin=-1.0, vmax=1.0, cmap="coolwarm", aspect="auto")
-    ax.set_title(title)
+    if str(title).strip():
+        ax.set_title(title)
 
     x_map: dict[str, str] = {}
     x_map.update(GEOMETRY_LATEX)
@@ -396,7 +402,7 @@ def _combined_train_heatmap(
             ax.text(j, i, txt, ha="center", va="center", fontsize=8)
 
     cbar = fig.colorbar(im, ax=ax, shrink=0.9)
-    cbar.set_label("Spearman ρ")
+    cbar.set_label(cbar_label)
     fig.savefig(out_path, dpi=200)
     plt.close(fig)
 
@@ -479,42 +485,80 @@ def main() -> None:
     tidy.to_csv(args.out_csv, index=False)
 
     out_dir = Path(args.out_dir)
-
-    # --- Params vs geometry ---
-    mat = _spearman_matrix(df_train, geometry_cols=GEOMETRY_COLS, param_cols=PARAM_COLS)
-    nmat = _pairwise_n_matrix(df_ext, row_cols=PARAM_COLS, col_cols=GEOMETRY_COLS)
-
-    # Also write the wide Spearman matrix (easy to diff / inspect).
     out_dir.mkdir(parents=True, exist_ok=True)
-    mat.to_csv(out_dir / "spearman_matrix_train.csv")
 
-    mat.to_csv(out_dir / "spearman_matrix_train_extended.csv")
+    # Pairwise n from the extended dataset (availability differs by parameter).
+    n_pg = _pairwise_n_matrix(df_ext, row_cols=PARAM_COLS, col_cols=GEOMETRY_COLS)
+    n_pp = _pairwise_n_matrix(df_ext, row_cols=PARAM_COLS, col_cols=PARAM_COLS)
 
-    # --- Params vs params (self-correlation) ---
-    pmat = _spearman_matrix(df_train, geometry_cols=PARAM_COLS, param_cols=PARAM_COLS)
-    pnmat = _pairwise_n_matrix(df_ext, row_cols=PARAM_COLS, col_cols=PARAM_COLS)
-    pmat.to_csv(out_dir / "spearman_params_matrix_train.csv")
-    pmat.to_csv(out_dir / "spearman_params_matrix_train_extended.csv")
-
-    # --- Combined (single-matrix) figures ---
+    # --- Spearman (train vs extended) ---
+    s_pg_train = _corr_matrix(
+        df_train, geometry_cols=GEOMETRY_COLS, param_cols=PARAM_COLS, method="spearman"
+    )
+    s_pp_train = _corr_matrix(
+        df_train, geometry_cols=PARAM_COLS, param_cols=PARAM_COLS, method="spearman"
+    )
+    s_pg_train.to_csv(out_dir / "spearman_matrix_train.csv")
+    s_pp_train.to_csv(out_dir / "spearman_params_matrix_train.csv")
     _combined_train_heatmap(
-        mat,
-        pmat,
+        s_pg_train,
+        s_pp_train,
         out_path=out_dir / "spearman_heatmaps_train.png",
-        title="Spearman correlation: optimal params vs geometry + params (train)",
+        title="",
+        cbar_label="Spearman ρ",
     )
 
-    # Extended: correlations computed on df_ext (b_p/b_n filled for non-train via apparent means),
-    # and annotated with pairwise n.
-    mat_ext = _spearman_matrix(df_ext, geometry_cols=GEOMETRY_COLS, param_cols=PARAM_COLS)
-    pmat_ext = _spearman_matrix(df_ext, geometry_cols=PARAM_COLS, param_cols=PARAM_COLS)
+    s_pg_ext = _corr_matrix(
+        df_ext, geometry_cols=GEOMETRY_COLS, param_cols=PARAM_COLS, method="spearman"
+    )
+    s_pp_ext = _corr_matrix(
+        df_ext, geometry_cols=PARAM_COLS, param_cols=PARAM_COLS, method="spearman"
+    )
+    s_pg_ext.to_csv(out_dir / "spearman_matrix_train_extended.csv")
+    s_pp_ext.to_csv(out_dir / "spearman_params_matrix_train_extended.csv")
     _combined_train_heatmap(
-        mat_ext,
-        pmat_ext,
+        s_pg_ext,
+        s_pp_ext,
         out_path=out_dir / "spearman_heatmaps_train_extended.png",
-        title="Spearman correlation: optimal params vs geometry + params (extended b_p/b_n)",
-        n_pg=nmat,
-        n_pp=pnmat,
+        title="",
+        cbar_label="Spearman ρ",
+        n_pg=n_pg,
+        n_pp=n_pp,
+    )
+
+    # --- Pearson (train vs extended) ---
+    p_pg_train = _corr_matrix(
+        df_train, geometry_cols=GEOMETRY_COLS, param_cols=PARAM_COLS, method="pearson"
+    )
+    p_pp_train = _corr_matrix(
+        df_train, geometry_cols=PARAM_COLS, param_cols=PARAM_COLS, method="pearson"
+    )
+    p_pg_train.to_csv(out_dir / "pearson_matrix_train.csv")
+    p_pp_train.to_csv(out_dir / "pearson_params_matrix_train.csv")
+    _combined_train_heatmap(
+        p_pg_train,
+        p_pp_train,
+        out_path=out_dir / "pearson_heatmaps_train.png",
+        title="",
+        cbar_label="Pearson r",
+    )
+
+    p_pg_ext = _corr_matrix(
+        df_ext, geometry_cols=GEOMETRY_COLS, param_cols=PARAM_COLS, method="pearson"
+    )
+    p_pp_ext = _corr_matrix(
+        df_ext, geometry_cols=PARAM_COLS, param_cols=PARAM_COLS, method="pearson"
+    )
+    p_pg_ext.to_csv(out_dir / "pearson_matrix_train_extended.csv")
+    p_pp_ext.to_csv(out_dir / "pearson_params_matrix_train_extended.csv")
+    _combined_train_heatmap(
+        p_pg_ext,
+        p_pp_ext,
+        out_path=out_dir / "pearson_heatmaps_train_extended.png",
+        title="",
+        cbar_label="Pearson r",
+        n_pg=n_pg,
+        n_pp=n_pp,
     )
 
 

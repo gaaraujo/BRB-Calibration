@@ -10,6 +10,9 @@ digitized scatter-cloud rows from envelope fit, **mean** only--median/quartiles 
 Apparent plastic onset on each zero-to-peak segment uses ``|F| >= PLASTIC_STRESS_RATIO_FY * f_y A_sc``
 (landmark loss uses ``f_y A_sc`` without this ratio; apparent-b extraction keeps 1.1 here.)
 Input resampled: ``data/resampled/{Name}/force_deformation.csv``. Scatter: filtered cloud if present else raw.
+``get_b_and_amplitude_lists_one_specimen`` returns segment-level ``b`` lists paired with plastic-fit amplitudes (for plots).
+``get_b_segment_scatter_metrics_one_specimen`` adds plastic strain and cumulative $x$ columns at segment peaks;
+``get_unordered_envelope_xmetrics_one_specimen`` gives single-point $x$ for extended unordered figures.
 """
 from __future__ import annotations
 
@@ -36,6 +39,7 @@ from specimen_catalog import (  # noqa: E402
     path_ordered_resampled_force_csv_stems,
     read_catalog,
     resolve_filtered_force_deformation_csv,
+    resolve_force_deformation_csv_for_max_strain,
     resolve_resampled_force_deformation_csv,
 )
 
@@ -54,6 +58,49 @@ MIN_PEAK_FRAC = 0.75
 #   w = (A/Amax)^p + eps
 APPARENT_B_WEIGHT_POWER = 2.0
 APPARENT_B_WEIGHT_EPS = 0.05
+
+
+def _delta_y_hat_inches(fy_ksi: float, E_hat_ksi: float, L_T_in: float) -> float | None:
+    """Yield deformation $\\hat{\\delta}_y = (f_y/\\hat{E}) L_T$ [in]; None if invalid."""
+    if L_T_in <= 0 or not np.isfinite(L_T_in):
+        return None
+    if not np.isfinite(fy_ksi) or not np.isfinite(E_hat_ksi) or E_hat_ksi == 0:
+        return None
+    return float((fy_ksi / E_hat_ksi) * L_T_in)
+
+
+def _cum_abs_deformation_over_Dy(u: np.ndarray, *, Dy: float) -> np.ndarray:
+    """Cumulative $\\sum|\\Delta u|$, normalized by $\\hat{\\delta}_y$ (same as overlay script)."""
+    u = np.asarray(u, dtype=float)
+    n = int(u.shape[0])
+    if n <= 0:
+        return np.zeros(0, dtype=float)
+    if not np.isfinite(Dy) or Dy == 0:
+        return np.full(n, np.nan, dtype=float)
+    du = np.diff(u)
+    cum = np.concatenate([[0.0], np.cumsum(np.abs(du))])
+    return cum / float(Dy)
+
+
+def _pointwise_inelastic_deformation(delta: np.ndarray, *, delta_y: float) -> np.ndarray:
+    """$\\delta_{\\mathrm{inel}} = \\mathrm{sign}(\\delta)\\max(|\\delta|-\\delta_y,0)$."""
+    d = np.asarray(delta, dtype=float)
+    mag = np.maximum(np.abs(d) - float(delta_y), 0.0)
+    return np.sign(d) * mag
+
+
+def _cum_inelastic_deformation_over_deltay(delta: np.ndarray, *, delta_y: float) -> np.ndarray:
+    """$\\sum|\\Delta\\delta_{\\mathrm{inel}}|/\\hat{\\delta}_y$ along the path."""
+    d = np.asarray(delta, dtype=float)
+    n = int(d.shape[0])
+    if n <= 0:
+        return np.zeros(0, dtype=float)
+    if not np.isfinite(delta_y) or delta_y == 0:
+        return np.full(n, np.nan, dtype=float)
+    delta_inel = _pointwise_inelastic_deformation(d, delta_y=delta_y)
+    d_delta_inel = np.diff(delta_inel)
+    cum = np.concatenate([[0.0], np.cumsum(np.abs(d_delta_inel))])
+    return cum / float(delta_y)
 
 
 def _segments_zero_to_peak(points: list[dict]) -> list[tuple[int, int, str]]:
@@ -142,6 +189,13 @@ def _b_from_segment(
     # Fit F = ksh * u + c from i_plastic to end
     u_fit = np.asarray(u_seg[i_plastic:], dtype=float)
     F_fit = np.asarray(F_seg[i_plastic:], dtype=float)
+    # Extra guard: ensure |u| exceeds the elastic deformation estimate
+    # D_e = F * L_T / (E_hat * A_sc) = F / k_init.
+    if kinit > 0:
+        de = np.abs(F_fit) / float(kinit)
+        m_de = np.isfinite(de) & np.isfinite(u_fit) & (np.abs(u_fit) > de)
+        u_fit = u_fit[m_de]
+        F_fit = F_fit[m_de]
     if len(u_fit) < 2:
         return None
     min_def_range = MIN_DEF_RANGE_FRAC * L_y if L_y > 0 else MIN_DEF_RANGE_ABS_IN
@@ -199,6 +253,13 @@ def _segment_line_data(
         return None
     u_fit = np.asarray(u_seg[i_plastic:], dtype=float)
     F_fit = np.asarray(F_seg[i_plastic:], dtype=float)
+    # Extra guard: ensure |u| exceeds the elastic deformation estimate
+    # D_e = F * L_T / (E_hat * A_sc) = F / k_init.
+    if kinit > 0:
+        de = np.abs(F_fit) / float(kinit)
+        m_de = np.isfinite(de) & np.isfinite(u_fit) & (np.abs(u_fit) > de)
+        u_fit = u_fit[m_de]
+        F_fit = F_fit[m_de]
     if len(u_fit) < 2:
         return None
     min_def_range = MIN_DEF_RANGE_FRAC * L_y if L_y > 0 else MIN_DEF_RANGE_ABS_IN
@@ -232,18 +293,21 @@ def _get_b_lists(
     L_T: float,
     L_y: float,
     fy: float,
-) -> tuple[list[float], list[float], list[float], list[float]]:
+) -> tuple[list[float], list[float], list[float], list[float], list[int], list[int]]:
     """
-    Return (b_p_list, b_n_list, amp_p_list, amp_n_list).
+    Return (b_p_list, b_n_list, amp_p_list, amp_n_list, end_idx_p, end_idx_n).
 
     Skips segments with too small def range or peak < 75% of previous same-kind peak.
     Amplitudes are max(|u|) over the fitted hardening region of each segment.
+    ``end_idx_*`` are cycle peak indices into ``u`` (same segment as each ``b`` / ``amp``).
     """
     segments = _segments_zero_to_peak(points)
     b_p_list: list[float] = []
     b_n_list: list[float] = []
     amp_p_list: list[float] = []
     amp_n_list: list[float] = []
+    end_p_list: list[int] = []
+    end_n_list: list[int] = []
     last_tension_peak: float | None = None
     last_compression_peak: float | None = None
     for start_idx, end_idx, _end_type in segments:
@@ -262,21 +326,30 @@ def _get_b_lists(
         if is_tension:
             b_p_list.append(b)
             amp_p_list.append(amp)
+            end_p_list.append(int(end_idx))
         else:
             b_n_list.append(b)
             amp_n_list.append(amp)
-    return (b_p_list, b_n_list, amp_p_list, amp_n_list)
+            end_n_list.append(int(end_idx))
+    return (b_p_list, b_n_list, amp_p_list, amp_n_list, end_p_list, end_n_list)
 
 
-def get_b_lists_one_specimen(specimen_id: str) -> tuple[list[float], list[float]]:
-    """Load resampled F-u and cycle points; return (b_n_list, b_p_list). Empty if no resampled CSV."""
+def get_b_and_amplitude_lists_one_specimen(
+    specimen_id: str,
+) -> tuple[list[float], list[float], list[float], list[float]]:
+    """
+    Load resampled F-u and cycle points; return (b_n_list, b_p_list, amp_n_list, amp_p_list).
+
+    Amplitudes match ``_segment_line_data``: max ``|u|`` over the plastic hardening fit window [in].
+    Lists are parallel within tension vs compression; order follows zero-to-peak segments along the path.
+    """
     resampled_path = resolve_resampled_force_deformation_csv(specimen_id, _PROJECT_ROOT)
     if resampled_path is None or not resampled_path.is_file():
-        return ([], [])
+        return ([], [], [], [])
     catalog = pd.read_csv(CATALOG_PATH)
     row = catalog[catalog["Name"].astype(str) == specimen_id]
     if row.empty:
-        return ([], [])
+        return ([], [], [], [])
     row = row.iloc[0]
     L_T = float(row["L_T_in"])
     L_y = float(row["L_y_in"])
@@ -285,7 +358,7 @@ def get_b_lists_one_specimen(specimen_id: str) -> tuple[list[float], list[float]
     fy = float(row["f_yc_ksi"])
     df = pd.read_csv(resampled_path)
     if "Force[kip]" not in df.columns or "Deformation[in]" not in df.columns:
-        return ([], [])
+        return ([], [], [], [])
     u = df["Deformation[in]"].values
     F = df["Force[kip]"].values
     n = len(u)
@@ -296,8 +369,164 @@ def get_b_lists_one_specimen(specimen_id: str) -> tuple[list[float], list[float]
         points, _ = loaded
     Q = compute_Q(L_T, L_y, A_sc, A_t)
     E_hat = Q * E_ksi
-    b_p_list, b_n_list, _amp_p, _amp_n = _get_b_lists(u, F, n, points, E_hat, A_sc, L_T, L_y, fy)
-    return (b_n_list, b_p_list)
+    b_p_list, b_n_list, amp_p_list, amp_n_list, _, _ = _get_b_lists(
+        u, F, n, points, E_hat, A_sc, L_T, L_y, fy
+    )
+    return (b_n_list, b_p_list, amp_n_list, amp_p_list)
+
+
+def get_b_segment_scatter_metrics_one_specimen(specimen_id: str) -> dict[str, object] | None:
+    """
+    Segment-level $b_n$ / $b_p$ with parallel abscissas for scatter plots.
+
+    Returns ``None`` if no resampled CSV. Otherwise a dict with list keys
+    ``b_n``, ``b_p``, ``x_amp_fit_pct_n``, ``x_amp_fit_pct_p`` (plastic-window
+    amplitude, matching ``bn_bp_vs_cycle_amplitude_norm_Ly``),
+    ``x_plastic_pct_n`` / ``_p`` ($100(\\delta_c^{\\max}-\\hat{\\delta}_y)/L_y$
+    at segment peak, $\\hat{\\delta}_y=(f_y/\\hat{E})L_T$),
+    ``x_cum_def_ratio_n`` / ``_p`` ($\\sum|\\Delta\\delta|/\\hat{\\delta}_y$ at peak),
+    ``x_cum_inel_ratio_n`` / ``_p`` ($\\sum|\\Delta\\delta_{\\mathrm{inel}}|/\\hat{\\delta}_y$).
+    """
+    resampled_path = resolve_resampled_force_deformation_csv(specimen_id, _PROJECT_ROOT)
+    if resampled_path is None or not resampled_path.is_file():
+        return None
+    catalog = pd.read_csv(CATALOG_PATH)
+    row = catalog[catalog["Name"].astype(str) == specimen_id]
+    if row.empty:
+        return None
+    row = row.iloc[0]
+    L_T = float(row["L_T_in"])
+    L_y = float(row["L_y_in"])
+    A_sc = float(row["A_c_in2"])
+    A_t = float(row["A_t_in2"])
+    fy = float(row["f_yc_ksi"])
+    df = pd.read_csv(resampled_path)
+    if "Force[kip]" not in df.columns or "Deformation[in]" not in df.columns:
+        return None
+    u = df["Deformation[in]"].values.astype(float, copy=False)
+    F = df["Force[kip]"].values.astype(float, copy=False)
+    n = len(u)
+    loaded = load_cycle_points_resampled(specimen_id)
+    if loaded is None:
+        points, _ = find_cycle_points(df)
+    else:
+        points, _ = loaded
+    Q = compute_Q(L_T, L_y, A_sc, A_t)
+    E_hat = Q * E_ksi
+    Dy = _delta_y_hat_inches(fy, E_hat, L_T)
+    cum_abs = _cum_abs_deformation_over_Dy(u, Dy=Dy if Dy is not None else float("nan"))
+    cum_inel = _cum_inelastic_deformation_over_deltay(
+        u, delta_y=Dy if Dy is not None else float("nan")
+    )
+
+    b_p_list, b_n_list, amp_p_list, amp_n_list, end_p_list, end_n_list = _get_b_lists(
+        u, F, n, points, E_hat, A_sc, L_T, L_y, fy
+    )
+
+    def xs_at_ends(ends: list[int]) -> tuple[list[float], list[float], list[float]]:
+        x_pl: list[float] = []
+        x_cd: list[float] = []
+        x_ci: list[float] = []
+        for j in ends:
+            if j < 0 or j >= n:
+                x_pl.append(float("nan"))
+                x_cd.append(float("nan"))
+                x_ci.append(float("nan"))
+                continue
+            um = abs(float(u[j]))
+            x_pl.append(
+                100.0 * (um - float(Dy)) / L_y
+                if Dy is not None and L_y > 0 and np.isfinite(L_y)
+                else float("nan")
+            )
+            x_cd.append(float(cum_abs[j]) if j < len(cum_abs) else float("nan"))
+            x_ci.append(float(cum_inel[j]) if j < len(cum_inel) else float("nan"))
+        return (x_pl, x_cd, x_ci)
+
+    x_pl_n, x_cd_n, x_ci_n = xs_at_ends(end_n_list)
+    x_pl_p, x_cd_p, x_ci_p = xs_at_ends(end_p_list)
+    x_amp_fit_n = [100.0 * float(a) / L_y for a in amp_n_list] if L_y > 0 else [float("nan")] * len(amp_n_list)
+    x_amp_fit_p = [100.0 * float(a) / L_y for a in amp_p_list] if L_y > 0 else [float("nan")] * len(amp_p_list)
+
+    return {
+        "b_n": b_n_list,
+        "b_p": b_p_list,
+        "x_amp_fit_pct_n": x_amp_fit_n,
+        "x_amp_fit_pct_p": x_amp_fit_p,
+        "x_plastic_pct_n": x_pl_n,
+        "x_plastic_pct_p": x_pl_p,
+        "x_cum_def_ratio_n": x_cd_n,
+        "x_cum_def_ratio_p": x_cd_p,
+        "x_cum_inel_ratio_n": x_ci_n,
+        "x_cum_inel_ratio_p": x_ci_p,
+    }
+
+
+def get_unordered_envelope_xmetrics_one_specimen(
+    specimen_id: str,
+    *,
+    project_root: Path,
+    catalog: pd.DataFrame,
+) -> dict[str, float] | None:
+    """
+    Single-point abscissas for extended B-vs-$x$ plots (unordered cloud): values at
+    $\\arg\\max|\\delta|$ along the resolved experimental record.
+    """
+    row = catalog[catalog["Name"].astype(str) == str(specimen_id)]
+    if row.empty:
+        return None
+    row = row.iloc[0]
+    L_T = float(row["L_T_in"])
+    L_y = float(row["L_y_in"])
+    A_sc = float(row["A_c_in2"])
+    A_t = float(row["A_t_in2"])
+    fy = float(row["f_yc_ksi"])
+    path = resolve_force_deformation_csv_for_max_strain(str(specimen_id), catalog, project_root=project_root)
+    if path is None or not path.is_file():
+        return None
+    try:
+        df = pd.read_csv(path, usecols=[DEF_COL])
+    except ValueError:
+        df = pd.read_csv(path)
+        if DEF_COL not in df.columns:
+            return None
+    u = pd.to_numeric(df[DEF_COL], errors="coerce").to_numpy(dtype=float)
+    m = np.isfinite(u)
+    u = u[m]
+    if u.size == 0:
+        return None
+    if L_y <= 0 or not np.isfinite(L_y):
+        return None
+    Q = compute_Q(L_T, L_y, A_sc, A_t)
+    E_hat = Q * E_ksi
+    Dy = _delta_y_hat_inches(fy, E_hat, L_T)
+    idx = int(np.argmax(np.abs(u)))
+    um = float(np.abs(u[idx]))
+    cum_abs = _cum_abs_deformation_over_Dy(u, Dy=Dy if Dy is not None else float("nan"))
+    cum_inel = _cum_inelastic_deformation_over_deltay(
+        u, delta_y=Dy if Dy is not None else float("nan")
+    )
+    x_amp = 100.0 * um / L_y
+    if Dy is not None and np.isfinite(Dy):
+        x_plastic = 100.0 * (um - Dy) / L_y
+        x_cd = float(cum_abs[idx]) if idx < len(cum_abs) else float("nan")
+        x_ci = float(cum_inel[idx]) if idx < len(cum_inel) else float("nan")
+    else:
+        x_plastic = float("nan")
+        x_cd = float("nan")
+        x_ci = float("nan")
+    return {
+        "x_amp_fit_pct": x_amp,
+        "x_plastic_pct": x_plastic,
+        "x_cum_def_ratio": x_cd,
+        "x_cum_inel_ratio": x_ci,
+    }
+
+
+def get_b_lists_one_specimen(specimen_id: str) -> tuple[list[float], list[float]]:
+    """Load resampled F-u and cycle points; return (b_n_list, b_p_list). Empty if no resampled CSV."""
+    bn, bp, _, _ = get_b_and_amplitude_lists_one_specimen(specimen_id)
+    return (bn, bp)
 
 
 def extract_bn_bp_one_specimen(
@@ -325,7 +554,7 @@ def extract_bn_bp_one_specimen(
     if n == 0:
         return {}
 
-    b_p_list, b_n_list, amp_p_list, amp_n_list = _get_b_lists(
+    b_p_list, b_n_list, amp_p_list, amp_n_list, _, _ = _get_b_lists(
         u, F, n, points, Q * E_ksi, A_sc, L_T, L_y, fy
     )
 
