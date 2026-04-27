@@ -8,14 +8,22 @@ from pathlib import Path
 import numpy as np
 
 from .jfeat_landmarks import (
-    LANDMARK_SLOTS_F0_EXTREMAL_D,
+    LANDMARK_SLOTS_F_LEVEL_PAIRING,
     N_LANDMARK_SLOTS,
+    POST_PEAK_LANDMARK_FY_FACTOR,
     _all_f_level_crossings,
+    _first_f_level_crossing,
     deformation_scale_s_d,
     extract_cycle_landmarks,
+    landmark_force_threshold,
     pair_sim_cycle_landmarks,
     _slot_error_combined_sq,
 )
+
+# Cache schema version. Bumped to 2 when slots 13–14 (post-peak partial unload) were added,
+# requiring per-cycle ``j``/``le_metric`` lists of length :data:`N_LANDMARK_SLOTS` and a
+# new top-level ``f_thr`` (= ``f_y * A_sc``) used by the sim path.
+LANDMARK_CACHE_VERSION = 2
 
 
 def force_scale_s_f(F_exp: np.ndarray) -> float:
@@ -244,10 +252,11 @@ def build_landmark_feature_cache(
         )
 
     return {
-        "version": 1,
+        "version": LANDMARK_CACHE_VERSION,
         "n": int(len(D)),
         "s_d": float(s_d),
         "s_f": float(s_f),
+        "f_thr": float(landmark_force_threshold(fy, a_sc)),
         "cycles": cycles,
     }
 
@@ -261,8 +270,11 @@ def weighted_landmark_vector_model(
     One flat row of weighted landmark (D, F) from **simulation**, using pairing frozen in ``cache``
     (from :func:`build_landmark_feature_cache`). For ``results.out``.
     """
-    if int(cache.get("version", 0)) != 1:
-        raise ValueError("landmark cache: expected version 1")
+    if int(cache.get("version", 0)) != LANDMARK_CACHE_VERSION:
+        raise ValueError(
+            f"landmark cache: expected version {LANDMARK_CACHE_VERSION}; "
+            f"regenerate via scripts/precompute_landmark_cache.py"
+        )
 
     D = np.asarray(D, dtype=float)
     F_sim = np.asarray(F_sim, dtype=float)
@@ -274,6 +286,8 @@ def weighted_landmark_vector_model(
 
     s_d = float(cache["s_d"])
     s_f = float(cache["s_f"])
+    f_thr = float(cache["f_thr"])
+    fp = float(POST_PEAK_LANDMARK_FY_FACTOR)
     out: list[float] = []
 
     for cyc in cache["cycles"]:
@@ -291,10 +305,15 @@ def weighted_landmark_vector_model(
                 le_metric.append(None)
             else:
                 le_metric.append((float(p[0]), float(p[1])))
+        if len(j_slots) != N_LANDMARK_SLOTS or len(le_metric) != N_LANDMARK_SLOTS:
+            raise ValueError(
+                f"landmark cache cycle [{s},{e}) expects {N_LANDMARK_SLOTS} slots; "
+                f"got j={len(j_slots)}, le_metric={len(le_metric)}"
+            )
 
         ls: list[tuple[float, float] | None] = [None] * N_LANDMARK_SLOTS
         for slot in range(N_LANDMARK_SLOTS):
-            if slot in LANDMARK_SLOTS_F0_EXTREMAL_D:
+            if slot in LANDMARK_SLOTS_F_LEVEL_PAIRING:
                 continue
             j = j_slots[slot]
             if j is None:
@@ -311,6 +330,22 @@ def weighted_landmark_vector_model(
                     ls[6] = max(f0, key=lambda p: p[0])
                 if le_metric[7] is not None:
                     ls[7] = min(f0, key=lambda p: p[0])
+
+        # Slots 13–14: post-peak partial-unload crossings on F_sim. Anchors are sim-side
+        # peaks computed at runtime (each curve searched after its own extremum).
+        if le_metric[12] is not None or le_metric[13] is not None:
+            fseg_sim = F_sim[s:e]
+            if len(fseg_sim) > 0:
+                i_max_sim = s + int(np.argmax(fseg_sim))
+                i_min_sim = s + int(np.argmin(fseg_sim))
+                if le_metric[12] is not None:
+                    hit = _first_f_level_crossing(D, F_sim, e, i_max_sim, -fp * f_thr)
+                    if hit is not None:
+                        ls[12] = hit[0]
+                if le_metric[13] is not None:
+                    hit = _first_f_level_crossing(D, F_sim, e, i_min_sim, +fp * f_thr)
+                    if hit is not None:
+                        ls[13] = hit[0]
 
         _append_weighted_cycle(out, le_metric, ls, w_c, s_f, s_d, from_experiment=False)
 

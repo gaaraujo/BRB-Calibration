@@ -1,7 +1,7 @@
 """
 Cycle-weighted landmark loss J_feat for prescribed (D, F) hysteresis.
 
-Twelve landmarks per weight cycle ``[s, e)`` on the experimental polyline (see
+Fourteen landmarks per weight cycle ``[s, e)`` on the experimental polyline (see
 ``extract_cycle_landmarks``). ``J_feat`` uses, for every slot, the **sum** of normalized
 squared (or absolute) **force** and **displacement** error at the paired exp/sim points, so
 pairing logic does not depend on per-slot metric type.
@@ -199,9 +199,17 @@ def _slot2_vertex_smallest_abs_d_on_first_sign_edge(
     return None
 
 
-N_LANDMARK_SLOTS = 12
-# Slots 7–8 (1-based): F=0 at extremal D; ``pair_sim_cycle_landmarks`` uses F_sim=0 crossings.
-# Other slots pair on the shared D-grid via nearest vertex (see ``pair_sim_cycle_landmarks``).
+N_LANDMARK_SLOTS = 14
+# Fraction of yield force ``f_y * A_sc`` used as the post-peak partial-unload target for
+# slots 13–14: after the tension peak (slot 13) the target is ``-fp * F_thr``; after the
+# compression peak (slot 14) it is ``+fp * F_thr``.
+POST_PEAK_LANDMARK_FY_FACTOR = 0.90
+# Slots paired by **F-level crossings on F_sim** rather than by shared-D-grid nearest-vertex
+# pairing. 1-based labels: 7, 8 (F=0 at extremal D), 13 (F=-fp*F_thr after tension peak),
+# 14 (F=+fp*F_thr after compression peak). Other slots pair on the shared D-grid via
+# nearest vertex (see ``pair_sim_cycle_landmarks``).
+LANDMARK_SLOTS_F_LEVEL_PAIRING = frozenset({6, 7, 12, 13})
+# Backwards-compatible alias for the original (slot 7/8 only) set name.
 LANDMARK_SLOTS_F0_EXTREMAL_D = frozenset({6, 7})
 
 
@@ -354,7 +362,7 @@ def extract_cycle_landmarks(
     dy_in: float | None = None,
 ) -> list[tuple[float, float] | None]:
     """
-    Twelve experimental landmarks on ``[s, e)``.
+    Fourteen experimental landmarks on ``[s, e)``.
 
     Slot meanings (1-based labels in debug plots/CSVs):
 
@@ -374,6 +382,9 @@ def extract_cycle_landmarks(
     10. Last crossing of D = (D_at_max_compression)/2 before the compression peak (within [s,i_min]).
     11. First crossing of D = (D_at_tension_yield)/2 after tension yield (within [i_yield,e)).
     12. First crossing of D = (D_at_compression_yield)/2 after compression yield (within [i_yield,e)).
+    13. First F = -fp * F_thr crossing on edges ``[k,k+1)`` with ``k >= i_max`` within [s,e),
+        where ``fp = POST_PEAK_LANDMARK_FY_FACTOR``. (Displacement-scored, like slots 7–8.)
+    14. First F = +fp * F_thr crossing on edges ``[k,k+1)`` with ``k >= i_min`` within [s,e).
 
     `F_thr = f_y * A_sc` [kip].
     """
@@ -503,6 +514,17 @@ def extract_cycle_landmarks(
         if hits:
             out[11] = hits[0]
 
+    # Slots 13–14: post-peak partial-unload F-level crossings (mirrors slots 7–8 geometry).
+    fp = float(POST_PEAK_LANDMARK_FY_FACTOR)
+    if slot3_ok:
+        hit13 = _first_f_level_crossing(D, F, e, i_max, -fp * F_thr)
+        if hit13 is not None:
+            out[12] = hit13[0]
+    if slot4_ok:
+        hit14 = _first_f_level_crossing(D, F, e, i_min, +fp * F_thr)
+        if hit14 is not None:
+            out[13] = hit14[0]
+
     return out
 
 
@@ -544,13 +566,16 @@ def pair_sim_cycle_landmarks(
     """
     Pair experimental landmarks to simulated ones on the **shared displacement grid** ``D``.
 
-    - Slots other than F=0 extremal (indices 6,7): target displacement ``d_e`` from ``le[slot]``;
-      find vertex index ``j`` in the same path window as ``extract_cycle_landmarks`` / former interp
-      (via ``_landmark_pair_path_window``) minimizing ``|D[j]-d_e|``; set
+    - Slots other than F-level pairing (indices 6, 7, 12, 13): target displacement ``d_e`` from
+      ``le[slot]``; find vertex index ``j`` in the same path window as ``extract_cycle_landmarks``
+      / former interp (via ``_landmark_pair_path_window``) minimizing ``|D[j]-d_e|``; set
       ``le_metric[slot]=(D[j],F_exp[j])`` and ``ls[slot]=(D[j],F_sim[j])``. If no valid ``j``, ``ls``
       stays ``None`` and ``le_metric[slot]`` stays the original ``le[slot]``.
-    - F=0 extremal-D (6,7): unchanged semantics — sim from F_sim=0 crossings when the matching exp
-      slot exists; ``le_metric[6/7]`` remains ``le[6/7]``.
+    - F=0 extremal-D (6, 7): unchanged semantics — sim from F_sim=0 crossings when the matching
+      exp slot exists; ``le_metric[6/7]`` remains ``le[6/7]``.
+    - Post-peak partial-unload (12, 13): sim from first F_sim = ∓fp*F_thr crossing on edges
+      ``[k,k+1)`` with ``k >= i_max`` (slot 12) or ``k >= i_min`` (slot 13) when the matching exp
+      slot exists; ``le_metric[12/13]`` remains ``le[12/13]``.
 
     Returns ``(ls, le_metric)``. Use ``le_metric`` with ``ls`` in feature loss so exp/sim share index ``j``.
     """
@@ -623,7 +648,7 @@ def pair_sim_cycle_landmarks(
             i_yc = i
 
     for slot in range(N_LANDMARK_SLOTS):
-        if slot in LANDMARK_SLOTS_F0_EXTREMAL_D:
+        if slot in LANDMARK_SLOTS_F_LEVEL_PAIRING:
             continue
         if le[slot] is None:
             continue
@@ -649,6 +674,18 @@ def pair_sim_cycle_landmarks(
                 ls[6] = max(f0, key=lambda p: p[0])
             if le[7] is not None:
                 ls[7] = min(f0, key=lambda p: p[0])
+
+    # Slots 13–14: post-peak partial-unload crossings on F_sim. ``i_max``/``i_min`` here come
+    # from F_sim already, so the sim curve is searched after its own peaks.
+    fp = float(POST_PEAK_LANDMARK_FY_FACTOR)
+    if le[12] is not None:
+        hit = _first_f_level_crossing(D, F_sim, e, i_max, -fp * F_thr)
+        if hit is not None:
+            ls[12] = hit[0]
+    if le[13] is not None:
+        hit = _first_f_level_crossing(D, F_sim, e, i_min, +fp * F_thr)
+        if hit is not None:
+            ls[13] = hit[0]
 
     return ls, le_metric
 
@@ -1014,7 +1051,8 @@ def load_p_y_kip_catalog(project_root: Path, name: str, fallback_fyp_ksi: float,
     cat = Path(project_root) / "config" / "calibration" / "BRB-Specimens.csv"
     if cat.is_file():
         try:
-            df = pd.read_csv(cat)
+            df = pd.read_csv(cat, skipinitialspace=True)
+            df.columns = df.columns.astype(str).str.strip()
             row = df[df["Name"].astype(str) == str(name)]
             if not row.empty:
                 fyc = float(row.iloc[0]["f_yc_ksi"])
