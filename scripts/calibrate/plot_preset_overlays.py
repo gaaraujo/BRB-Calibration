@@ -1,22 +1,24 @@
 """
-Preset **combined** normalized overlays (``set{k}_combined_force_def_norm.png``) with fixed ``b_p`` /
-``b_n`` and steel from ``set_id_settings.csv``.
+Combined normalized **initial** BRB overlays (``set{k}_combined_force_def_norm.png``) before
+individual L-BFGS.
 
-Writes numerical ``{Name}_set{k}_simulated.csv`` under ``results/calibration/individual_optimize/initial_params_simulated_force/``,
-a snapshot parameters CSV ``initial_params_overlay_parameters.csv``, then builds one montage per ``set_id``
-(same layout as ``plot_compare_calibration_overlays.py`` for individual optimize). Does **not** write per-specimen PNGs.
+Reads ``results/calibration/individual_optimize/initial_brb_parameters.csv`` (default; override with
+``--params``). Produces **two** separate montage sets when ``--scope both`` (default):
 
-Typical (matches ``run.ps1`` / ``run.sh`` before L-BFGS)::
+1. **Training cohort** — ``individual_optimize=true`` and path-ordered resampled data only.
+   Simulated CSVs: ``initial_params_simulated_force/``. PNGs: ``overlays_initial_params/``.
 
-    python scripts/calibrate/plot_preset_overlays.py --set-id-settings config/calibration/set_id_settings.csv
+2. **All specimens** — every path-ordered row in the parameters table (any ``individual_optimize``)
+   plus digitized-unordered specimens in the parameters table.
+   Simulated CSVs: ``initial_params_simulated_force_all_specimens/``.
+   PNGs: ``overlays_initial_params_all_specimens/``.
 
-Or use an existing parameters CSV instead of rebuilding from seeds::
+Typical::
 
-    python scripts/calibrate/plot_preset_overlays.py --params results/calibration/individual_optimize/initial_brb_parameters.csv
+    python scripts/calibrate/plot_preset_overlays.py
 
-Requires: postprocess through ``extract_bn_bp.py`` (``specimen_apparent_bn_bp.csv``) and
-resampled ``data/resampled/{Name}/force_deformation.csv`` for path-ordered specimens with
-``individual_optimize=true``.
+Requires: ``build_initial_brb_parameters.py``, resampled path-ordered data where applicable, and
+digitized inputs for unordered specimens.
 """
 from __future__ import annotations
 
@@ -31,19 +33,14 @@ _PROJECT_ROOT = _SCRIPT_DIR.parent.parent
 _SCRIPTS = _PROJECT_ROOT / "scripts"
 sys.path.insert(0, str(_SCRIPTS))
 
-from calibrate.build_initial_brb_parameters import (  # noqa: E402
-    CATALOG_PATH,
-    DEFAULT_BN_BP_PATH,
-    OUT_COLS,
-    build_initial_rows,
-    load_initial_brb_seeds,
-)
 from calibrate.calibration_paths import (  # noqa: E402
-    INITIAL_PARAMS_OVERLAY_PARAMETERS_PATH,
+    BRB_SPECIMENS_CSV,
+    INITIAL_BRB_PARAMETERS_PATH,
+    INITIAL_PARAMS_SIMULATED_FORCE_ALL_SPECIMENS_DIR,
     INITIAL_PARAMS_SIMULATED_FORCE_DIR,
     PLOTS_INDIVIDUAL_OPTIMIZE,
+    PLOTS_INITIAL_PARAMS_ALL_SPECIMENS_OVERLAYS,
     PLOTS_INITIAL_PARAMS_OVERLAYS,
-    SET_ID_SETTINGS_CSV,
 )
 from calibrate.plot_compare_calibration_overlays import (  # noqa: E402
     _discover_simulated_index,
@@ -53,129 +50,21 @@ from calibrate.plot_compare_calibration_overlays import (  # noqa: E402
 from calibrate.plot_params_vs_filtered import run_multi_specimen_simulated_csvs  # noqa: E402
 from specimen_catalog import read_catalog  # noqa: E402
 
-DEFAULT_PRESET_BP = 0.007
-DEFAULT_PRESET_BN = 0.020
 
-
-def _params_from_seeds(
+def _run_one_preset_batch(
     *,
-    set_id_settings_path: Path,
-    catalog_path: Path,
-    bn_bp_path: Path,
-) -> pd.DataFrame:
-    if not bn_bp_path.is_file():
-        raise SystemExit(f"Missing {bn_bp_path}; run extract_bn_bp.py after resample_filtered.py.")
-    catalog = pd.read_csv(catalog_path)
-    bn_bp = pd.read_csv(bn_bp_path)
-    seeds = load_initial_brb_seeds(set_id_settings_path)
-    rows = build_initial_rows(catalog, bn_bp, seeds=seeds)
-    if not rows:
-        raise SystemExit("No rows after catalog merge; check BRB-Specimens.csv.")
-    out = pd.DataFrame(rows)
-    return out[OUT_COLS]
-
-
-def main() -> None:
-    p = argparse.ArgumentParser(
-        description=(
-            "Preset combined normalized overlays (one PNG per set_id) with fixed b_p/b_n; "
-            "steel from --set-id-settings or --params CSV."
-        ),
-    )
-    p.add_argument(
-        "--set-id-settings",
-        type=Path,
-        default=SET_ID_SETTINGS_CSV,
-        help=(
-            "set_id_settings.csv (ignored if --params is set). "
-            f"Default: {SET_ID_SETTINGS_CSV}."
-        ),
-    )
-    p.add_argument(
-        "--params",
-        type=Path,
-        default=None,
-        help=(
-            "Optional: use this parameters CSV instead of rebuilding from --set-id-settings "
-            "(e.g. results/calibration/individual_optimize/initial_brb_parameters.csv)."
-        ),
-    )
-    p.add_argument(
-        "--catalog",
-        type=Path,
-        default=CATALOG_PATH,
-        help="BRB-Specimens.csv (only used when building from --set-id-settings).",
-    )
-    p.add_argument(
-        "--bn-bp",
-        type=Path,
-        default=DEFAULT_BN_BP_PATH,
-        help="specimen_apparent_bn_bp.csv from extract_bn_bp.py (only used with --set-id-settings).",
-    )
-    p.add_argument(
-        "--override-bp",
-        type=float,
-        default=DEFAULT_PRESET_BP,
-        metavar="VAL",
-        help=f"Fixed b_p for every simulation (default: {DEFAULT_PRESET_BP:g}).",
-    )
-    p.add_argument(
-        "--override-bn",
-        type=float,
-        default=DEFAULT_PRESET_BN,
-        metavar="VAL",
-        help=f"Fixed b_n for every simulation (default: {DEFAULT_PRESET_BN:g}).",
-    )
-    p.add_argument(
-        "--output-dir",
-        type=str,
-        default=PLOTS_INITIAL_PARAMS_OVERLAYS.name,
-        help=(
-            f"Subfolder under {PLOTS_INDIVIDUAL_OPTIMIZE.relative_to(_PROJECT_ROOT)}/ "
-            f"(default: {PLOTS_INITIAL_PARAMS_OVERLAYS.name!r})."
-        ),
-    )
-    p.add_argument(
-        "--specimen",
-        type=str,
-        default=None,
-        help="If set, only this specimen Name (must be individual_optimize with resampled data).",
-    )
-    args = p.parse_args()
-
-    plots_dir = PLOTS_INDIVIDUAL_OPTIMIZE / args.output_dir
-
-    params_df: pd.DataFrame
-    label: str | Path
-
-    if args.params is not None:
-        params_path = Path(args.params).expanduser().resolve()
-        if not params_path.is_file():
-            raise SystemExit(f"Parameters CSV not found: {params_path}")
-        params_df = pd.read_csv(params_path)
-        label = params_path
-        print(f"Parameters from {params_path}")
-    else:
-        settings_path = Path(args.set_id_settings).expanduser().resolve()
-        if not settings_path.is_file():
-            raise SystemExit(f"set_id settings CSV not found: {settings_path}")
-        catalog_path = Path(args.catalog).expanduser().resolve()
-        bn_bp_path = Path(args.bn_bp).expanduser().resolve()
-        print(f"Building parameters from set_id settings: {settings_path}")
-        params_df = _params_from_seeds(
-            set_id_settings_path=settings_path,
-            catalog_path=catalog_path,
-            bn_bp_path=bn_bp_path,
-        )
-        label = f"{settings_path} (built)"
-
-    obp = float(args.override_bp)
-    obn = float(args.override_bn)
-    params_df = params_df.copy()
-    params_df["b_p"] = obp
-    params_df["b_n"] = obn
-
-    sim_dir = INITIAL_PARAMS_SIMULATED_FORCE_DIR
+    banner: str,
+    params_df: pd.DataFrame,
+    params_path: Path,
+    sim_dir: Path,
+    plots_dir: Path,
+    catalog: pd.DataFrame,
+    catalog_names: list[str],
+    specimen: str | None,
+    require_individual_optimize: bool,
+    include_digitized_unordered: bool,
+) -> bool:
+    print(banner)
     if sim_dir.is_dir():
         for f in sim_dir.glob("*_set*_simulated.csv"):
             try:
@@ -183,26 +72,21 @@ def main() -> None:
             except OSError:
                 pass
 
-    INITIAL_PARAMS_OVERLAY_PARAMETERS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    params_df.to_csv(INITIAL_PARAMS_OVERLAY_PARAMETERS_PATH, index=False)
-    print(f"Wrote {INITIAL_PARAMS_OVERLAY_PARAMETERS_PATH}")
-
     run_multi_specimen_simulated_csvs(
         params_df,
         sim_dir,
-        params_path_label=label,
-        specimen=args.specimen,
-        override_bp=obp,
-        override_bn=obn,
+        params_path_label=params_path,
+        specimen=specimen,
+        override_bp=None,
+        override_bn=None,
+        require_individual_optimize=require_individual_optimize,
+        include_digitized_unordered=include_digitized_unordered,
     )
-
-    catalog = read_catalog(CATALOG_PATH)
-    catalog_names = catalog["Name"].astype(str).tolist()
 
     idx = _discover_simulated_index(sim_dir)
     if not idx:
-        print(f"No *_simulated.csv under {sim_dir}; combined figures skipped.")
-        return
+        print(f"No *_simulated.csv under {sim_dir}; combined figures skipped for this batch.")
+        return False
 
     any_written = False
     for set_id in sorted(idx.keys()):
@@ -211,7 +95,7 @@ def main() -> None:
             set_id,
             specimen_names,
             plots_dir,
-            INITIAL_PARAMS_OVERLAY_PARAMETERS_PATH,
+            params_path,
             sim_dir,
             catalog,
             grid_cols=3,
@@ -224,9 +108,95 @@ def main() -> None:
             )
 
     if any_written:
-        print(f"Done. Combined PNGs under {plots_dir}")
+        print(f"Done this batch. PNGs under {plots_dir}")
     else:
-        print("No combined figures written.")
+        print("No combined figures written for this batch.")
+    return any_written
+
+
+def main() -> None:
+    p = argparse.ArgumentParser(
+        description=(
+            "Initial-BRB combined overlays from initial_brb_parameters.csv. "
+            "Default: training cohort and all-specimens batches (separate folders)."
+        ),
+    )
+    p.add_argument(
+        "--params",
+        type=Path,
+        default=INITIAL_BRB_PARAMETERS_PATH,
+        help=f"Parameters CSV (default: {INITIAL_BRB_PARAMETERS_PATH}).",
+    )
+    p.add_argument(
+        "--scope",
+        choices=("both", "train", "all"),
+        default="both",
+        help=(
+            "train: individual_optimize path-ordered only; "
+            "all: every path-ordered + digitized unordered; "
+            "both: write both separate overlay sets."
+        ),
+    )
+    p.add_argument(
+        "--output-dir",
+        type=str,
+        default=PLOTS_INITIAL_PARAMS_OVERLAYS.name,
+        help=(
+            f"Subfolder for the **train** batch under {PLOTS_INDIVIDUAL_OPTIMIZE.relative_to(_PROJECT_ROOT)}/ "
+            f"(default: {PLOTS_INITIAL_PARAMS_OVERLAYS.name!r}). "
+            "The **all-specimens** batch always uses overlays_initial_params_all_specimens/."
+        ),
+    )
+    p.add_argument(
+        "--specimen",
+        type=str,
+        default=None,
+        help="If set, only this specimen Name (path-ordered and/or digitized-unordered per batch).",
+    )
+    args = p.parse_args()
+
+    params_path = Path(args.params).expanduser().resolve()
+    if not params_path.is_file():
+        raise SystemExit(
+            f"Parameters CSV not found: {params_path}\n"
+            "Run: python scripts/calibrate/build_initial_brb_parameters.py"
+        )
+    params_df = pd.read_csv(params_path)
+    print(f"Parameters from {params_path} (per-row b_p, b_n and steel from CSV)")
+
+    catalog = read_catalog(BRB_SPECIMENS_CSV)
+    catalog_names = catalog["Name"].astype(str).tolist()
+
+    train_plots_dir = PLOTS_INDIVIDUAL_OPTIMIZE / args.output_dir
+    all_plots_dir = PLOTS_INITIAL_PARAMS_ALL_SPECIMENS_OVERLAYS
+
+    if args.scope in ("both", "train"):
+        _run_one_preset_batch(
+            banner="--- Batch: individual_optimize training cohort (path-ordered) ---",
+            params_df=params_df,
+            params_path=params_path,
+            sim_dir=INITIAL_PARAMS_SIMULATED_FORCE_DIR,
+            plots_dir=train_plots_dir,
+            catalog=catalog,
+            catalog_names=catalog_names,
+            specimen=args.specimen,
+            require_individual_optimize=True,
+            include_digitized_unordered=False,
+        )
+
+    if args.scope in ("both", "all"):
+        _run_one_preset_batch(
+            banner="--- Batch: all specimens (path-ordered + digitized unordered) ---",
+            params_df=params_df,
+            params_path=params_path,
+            sim_dir=INITIAL_PARAMS_SIMULATED_FORCE_ALL_SPECIMENS_DIR,
+            plots_dir=all_plots_dir,
+            catalog=catalog,
+            catalog_names=catalog_names,
+            specimen=args.specimen,
+            require_individual_optimize=False,
+            include_digitized_unordered=True,
+        )
 
 
 if __name__ == "__main__":

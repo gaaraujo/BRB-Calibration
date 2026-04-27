@@ -11,10 +11,22 @@ those figures). **All** files: ``bn_vs_geometry_all_{mean,median,weighted_mean,q
 Box plots: ``box_bn_vs_geometry.png`` / ``box_bp_vs_geometry.png``.
 
 **B vs cycle amplitude** (``results/plots/apparent_b/b_vs_cycle_amplitude/``): segment-level $b_n$ / $b_p$
-vs several abscissas (same layout for each): plastic-window $\\delta_c^{\\max}/L_y$ [%];
-$(\\delta_c^{\\max}-\\hat{\\delta}_y)/L_y$ [%] with $\\hat{\\delta}_y=(f_y/\\hat{E})L_T$;
+vs several abscissas (same layout for each): plastic-window $\\delta_c^{\\max}/\\hat{\\delta}_y$;
+$(\\delta_c^{\\max}-\\hat{\\delta}_y)/\\hat{\\delta}_y$ with $\\hat{\\delta}_y=(f_y/\\hat{E})L_T$;
+the same normalization vs prior opposite-direction peak before each half-cycle; cumulative
 $\\sum|\\Delta\\delta|/\\hat{\\delta}_y$ and $\\sum|\\Delta\\delta_{\\mathrm{inel}}|/\\hat{\\delta}_y$ at segment peaks.
 **Extended** adds unordered specimens as one square per panel (envelope $b$, $x$ at $\\arg\\max|\\delta|$).
+Prior-opposite-peak plastic $x$ for unordered uses the same prefix deformation rule as resampled segments
+(see ``get_unordered_envelope_xmetrics_one_specimen``).
+
+**Origin-elastic normalized stress** (``norm_stress_origin_elastic_vs_cycle/``): $P/(f_y A_{sc})$ at plastic line
+$\\cap$ $F=k_{\\mathrm{init}}u$ through $(0,0)$, vs the **same** abscissas as ``b_vs_cycle_amplitude`` (cycle amplitude,
+plastic strain, prior-opp plastic, cumulative deformation / inelastic).
+
+**$\\sigma_0/f_y$** and **$\\sigma_0^{\\mathrm{eq}}/f_y$** (``norm_sigma0_vs_cycle/``, ``equiv_norm_sigma0_vs_cycle/``):
+same abscissas as ``b_vs_cycle_amplitude`` (prior-peak $\\sigma_0$ uses latest opposite landmark before plastic onset;
+$\\sigma_0^{\\mathrm{eq}}$ uses global max compressive / tensile anchor). Diagnostic overlays:
+``scripts/calibrate/plot_sig0_slopes.py`` → ``results/plots/apparent_b/sig0_slopes/``.
 """
 from __future__ import annotations
 
@@ -50,12 +62,15 @@ from plot_dimensions import (  # noqa: E402
     grid_montage_rcparams,
     style_axes_spines_and_ticks,
 )
+from specimen_colors import (  # noqa: E402
+    specimen_color_by_name_map,
+    specimen_names_in_plot_order,
+)
 from calibrate.calibration_paths import SPECIMEN_APPARENT_BN_BP_PATH  # noqa: E402
 
 configure_matplotlib_style()
 from calibrate.digitized_unordered_bn import compute_envelope_bn_unordered  # noqa: E402
 from extract_bn_bp import (
-    get_b_and_amplitude_lists_one_specimen,
     get_b_lists_one_specimen,
     get_b_segment_scatter_metrics_one_specimen,
     get_specimens_with_resampled,
@@ -76,6 +91,9 @@ _APPARENT = _PROJECT_ROOT / "results" / "plots" / "apparent_b"
 HIST_DIR = _APPARENT / "b_histograms"
 B_VS_GEOMETRY_DIR = _APPARENT / "b_vs_geometry"
 B_VS_CYCLE_AMP_DIR = _APPARENT / "b_vs_cycle_amplitude"
+NORM_STRESS_ORIGIN_ELASTIC_VS_CYCLE_DIR = _APPARENT / "norm_stress_origin_elastic_vs_cycle"
+NORM_SIGMA0_VS_CYCLE_DIR = _APPARENT / "norm_sigma0_vs_cycle"
+EQUIV_NORM_SIGMA0_VS_CYCLE_DIR = _APPARENT / "equiv_norm_sigma0_vs_cycle"
 # Wider than ``figsize_for_grid(2, 1)`` (2.5 in): mathtext x-label, y-labels, right legend.
 _B_VS_CYCLE_AMP_FIG_W_IN: float = 8.25
 # Outside legends: fewer columns so the figure does not need excessive width (specimen names wrap to more rows).
@@ -363,11 +381,11 @@ def plot_scatter_bn_bp(
     df = _geometry_augment_for_scatter(df)
     stat_label = _stat_label_word(segment_stat)
 
-    # Color-code by specimen for scatter (consistent across panels)
+    # Color-code by specimen for scatter (consistent across panels and repo-wide)
     if "Name" in df.columns:
-        specimens = sorted(df["Name"].astype(str).unique())
-        cmap = plt.colormaps["tab10"]
-        specimen_color = {s: cmap((i % 10) / 9.0) for i, s in enumerate(specimens)}
+        _cat = read_catalog()
+        specimen_color = specimen_color_by_name_map(_cat)
+        specimens = specimen_names_in_plot_order(_cat, df["Name"].dropna().astype(str).unique())
         specimen_handles = [
             Line2D([0], [0], marker="o", color="w", markerfacecolor=specimen_color[s], markersize=8, markeredgewidth=0, label=s)
             for s in specimens
@@ -454,27 +472,35 @@ def plot_bn_bp_vs_abscissa(
     out_dir: Path,
     *,
     extended: bool = False,
-    abscissa: Literal["amp_fit", "plastic", "cum_def", "cum_inel"] = "amp_fit",
+    abscissa: Literal["amp_fit", "plastic", "plastic_opp", "cum_def", "cum_inel"] = "amp_fit",
 ) -> None:
     """
     Apparent $b_n$ / $b_p$ vs a chosen abscissa (segment peaks for ordered resampled data).
 
-    ``abscissa``: plastic-window $\\delta_c^{\\max}/L_y$ [%] (``amp_fit``); plastic strain
-    $(\\delta_c^{\\max}-\\hat{\\delta}_y)/L_y$ [%]; or cumulative deformation / inelastic
-    ratios vs $\\hat{\\delta}_y$ (same definitions as ``plot_individual_best_l1_l2_overlays``).
+    ``abscissa``: plastic-window $\\delta_c^{\\max}/\\hat{\\delta}_y$ (``amp_fit``); plastic strain
+    $(\\delta_c^{\\max}-\\hat{\\delta}_y)/\\hat{\\delta}_y$ at the segment peak (``plastic``);
+    the same $x$ using the **maximum** prior opposite-direction deformation on the resampled prefix
+    before each half-cycle (compression $b_n$: largest prior $u$; tension $b_p$: deepest prior $u<0$;
+    ``plastic_opp``); or cumulative deformation / inelastic ratios vs $\\hat{\\delta}_y$
+    (same definitions as ``plot_individual_best_l1_l2_overlays``).
 
     ``extended=True``: catalog order with ``specimen_apparent_bn_bp.csv``; unordered specimens
-    as one square per panel at envelope means and $x$ at $\\arg\\max|\\delta|$.
+    as one square per panel at envelope means; $x$ at $\\arg\\max|\\delta|$ (prior-opp plastic uses
+    prefix $u$ before that index, per ``get_unordered_envelope_xmetrics_one_specimen``).
     """
     out_dir.mkdir(parents=True, exist_ok=True)
     if abscissa == "amp_fit":
-        stem = "bn_bp_vs_cycle_amplitude_norm_Ly"
-        xlabel = r"$\delta_c^{\max}/L_y$ [%]"
-        kn, kp, ku = "x_amp_fit_pct_n", "x_amp_fit_pct_p", "x_amp_fit_pct"
+        stem = "bn_bp_vs_cycle_amplitude_norm_hat_delta_y"
+        xlabel = r"$\delta_c^{\max}/\hat{\delta}_y$"
+        kn, kp, ku = "x_amp_fit_ratio_n", "x_amp_fit_ratio_p", "x_amp_fit_ratio"
     elif abscissa == "plastic":
-        stem = "bn_bp_vs_plastic_strain_norm_Ly"
-        xlabel = r"$(\delta_c^{\max}-\hat{\delta}_y)/L_y$ [%]"
-        kn, kp, ku = "x_plastic_pct_n", "x_plastic_pct_p", "x_plastic_pct"
+        stem = "bn_bp_vs_plastic_strain_norm_hat_delta_y"
+        xlabel = r"$(\delta_c^{\max}-\hat{\delta}_y)/\hat{\delta}_y$"
+        kn, kp, ku = "x_plastic_ratio_n", "x_plastic_ratio_p", "x_plastic_ratio"
+    elif abscissa == "plastic_opp":
+        stem = "bn_bp_vs_plastic_strain_prior_opp_peak_norm_hat_delta_y"
+        xlabel = r"$(\delta^{\mathrm{opp}}_{\mathrm{prior}}-\hat{\delta}_y)/\hat{\delta}_y$"
+        kn, kp, ku = "x_plastic_opp_ratio_n", "x_plastic_opp_ratio_p", "x_plastic_opp_ratio"
     elif abscissa == "cum_def":
         stem = "bn_bp_vs_cum_deformation_ratio"
         xlabel = r"$\sum|\Delta\delta|/\hat{\delta}_y$"
@@ -501,21 +527,21 @@ def plot_bn_bp_vs_abscissa(
             return
         app_by_name = None
 
-    cmap = plt.colormaps["tab10"]
-    colors = {s: cmap((i % 10) / 9.0) for i, s in enumerate(specimens_plot)}
+    color_by_name = specimen_color_by_name_map(catalog)
+    specimens_ordered = specimen_names_in_plot_order(catalog, specimens_plot)
     specimen_handles = [
         Line2D(
             [0],
             [0],
             marker="o",
             color="w",
-            markerfacecolor=colors[s],
+            markerfacecolor=color_by_name[s],
             markersize=8,
             markeredgewidth=0.5,
             markeredgecolor="0.35",
             label=s,
         )
-        for s in specimens_plot
+        for s in specimens_ordered
     ]
 
     def _finite_pairs(xs: list[float], bs: list[float]) -> tuple[list[float], list[float]]:
@@ -543,7 +569,7 @@ def plot_bn_bp_vs_abscissa(
             Ly = float(catalog_by_name.loc[sid]["L_y_in"])
             if not np.isfinite(Ly) or Ly <= 0:
                 continue
-            col = colors[sid]
+            col = color_by_name.get(sid, (0.5, 0.5, 0.5, 1.0))
             rec = get_specimen_record(sid, catalog)
             if extended and uses_unordered_inputs(rec):
                 if app_by_name is None or sid not in app_by_name.index:
@@ -556,7 +582,41 @@ def plot_bn_bp_vs_abscissa(
                 ux = get_unordered_envelope_xmetrics_one_specimen(
                     sid, project_root=_PROJECT_ROOT, catalog=catalog
                 )
-                if ux is None or ku not in ux:
+                if ux is None:
+                    continue
+                if abscissa == "plastic_opp":
+                    if kn not in ux or kp not in ux:
+                        continue
+                    xn_val = float(ux[kn])
+                    xp_val = float(ux[kp])
+                    if np.isfinite(xn_val) and np.isfinite(float(bn_m)):
+                        ax_n.scatter(
+                            [xn_val],
+                            [float(bn_m)],
+                            c=[col],
+                            s=64,
+                            marker="s",
+                            edgecolors="white",
+                            linewidths=0.45,
+                            zorder=3,
+                        )
+                        all_bn.append(float(bn_m))
+                        has_pts = True
+                    if np.isfinite(xp_val) and np.isfinite(float(bp_m)):
+                        ax_p.scatter(
+                            [xp_val],
+                            [float(bp_m)],
+                            c=[col],
+                            s=64,
+                            marker="s",
+                            edgecolors="white",
+                            linewidths=0.45,
+                            zorder=3,
+                        )
+                        all_bp.append(float(bp_m))
+                        has_pts = True
+                    continue
+                if ku not in ux:
                     continue
                 x_val = float(ux[ku])
                 if not np.isfinite(x_val):
@@ -586,18 +646,13 @@ def plot_bn_bp_vs_abscissa(
                 has_pts = True
                 continue
 
-            if abscissa == "amp_fit":
-                bn, bp, an, ap = get_b_and_amplitude_lists_one_specimen(sid)
-                xn_list = [100.0 * float(a) / Ly for a in an]
-                xp_list = [100.0 * float(a) / Ly for a in ap]
-            else:
-                met = get_b_segment_scatter_metrics_one_specimen(sid)
-                if met is None:
-                    continue
-                bn = met["b_n"]  # type: ignore[assignment]
-                bp = met["b_p"]  # type: ignore[assignment]
-                xn_list = list(met[kn])  # type: ignore[arg-type]
-                xp_list = list(met[kp])  # type: ignore[arg-type]
+            met = get_b_segment_scatter_metrics_one_specimen(sid)
+            if met is None:
+                continue
+            bn = met["b_n"]  # type: ignore[assignment]
+            bp = met["b_p"]  # type: ignore[assignment]
+            xn_list = list(met[kn])  # type: ignore[arg-type]
+            xp_list = list(met[kp])  # type: ignore[arg-type]
 
             xxn, bbn = _finite_pairs(xn_list, bn)
             if xxn:
@@ -685,6 +740,385 @@ def plot_bn_bp_vs_abscissa(
     print(f"Wrote {fname} under {out_dir.resolve()}")
 
 
+def plot_norm_stress_origin_elastic_vs_abscissa(
+    out_dir: Path,
+    *,
+    extended: bool = False,
+    abscissa: Literal["amp_fit", "plastic", "plastic_opp", "cum_def", "cum_inel"] = "amp_fit",
+) -> None:
+    """
+    Normalized stress $P/(f_y A_{sc})$ at plastic $b$-line $\\cap$ $F=k_{\\mathrm{init}}u$ through $(u,F)=(0,0)$
+    (initial tangent from the origin, not ``F`` at $\\delta=0$ on the record). Same abscissas as ``plot_bn_bp_vs_abscissa``.
+    Top: compression half-cycles ($y\\in[0,-2]$, inverted); bottom: tension ($[0,2]$).
+    Unordered digitized specimens are omitted (no segment-level analogue in the envelope workflow).
+    """
+    out_dir.mkdir(parents=True, exist_ok=True)
+    if abscissa == "amp_fit":
+        stem = "norm_stress_origin_elastic_vs_cycle_amplitude_norm_hat_delta_y"
+        xlabel = r"$\delta_c^{\max}/\hat{\delta}_y$"
+        kn, kp = "x_amp_fit_ratio_n", "x_amp_fit_ratio_p"
+    elif abscissa == "plastic":
+        stem = "norm_stress_origin_elastic_vs_plastic_strain_norm_hat_delta_y"
+        xlabel = r"$(\delta_c^{\max}-\hat{\delta}_y)/\hat{\delta}_y$"
+        kn, kp = "x_plastic_ratio_n", "x_plastic_ratio_p"
+    elif abscissa == "plastic_opp":
+        stem = "norm_stress_origin_elastic_vs_plastic_strain_prior_opp_peak_norm_hat_delta_y"
+        xlabel = r"$(\delta^{\mathrm{opp}}_{\mathrm{prior}}-\hat{\delta}_y)/\hat{\delta}_y$"
+        kn, kp = "x_plastic_opp_ratio_n", "x_plastic_opp_ratio_p"
+    elif abscissa == "cum_def":
+        stem = "norm_stress_origin_elastic_vs_cum_deformation_ratio"
+        xlabel = r"$\sum|\Delta\delta|/\hat{\delta}_y$"
+        kn, kp = "x_cum_def_ratio_n", "x_cum_def_ratio_p"
+    else:
+        stem = "norm_stress_origin_elastic_vs_cum_inelastic_deformation_ratio"
+        xlabel = r"$\sum|\Delta\delta_{\mathrm{inel}}|/\hat{\delta}_y$"
+        kn, kp = "x_cum_inel_ratio_n", "x_cum_inel_ratio_p"
+    fname = f"{stem}_extended.png" if extended else f"{stem}.png"
+
+    catalog = read_catalog()
+    catalog_by_name = catalog.set_index("Name")
+
+    if extended:
+        if not PARAMS_CSV.is_file():
+            return
+        app = pd.read_csv(PARAMS_CSV)
+        in_app = set(app["Name"].astype(str))
+        specimens_plot = [n for n in catalog.sort_values("ID")["Name"].astype(str) if n in in_app]
+    else:
+        specimens_plot = sorted(get_specimens_with_resampled())
+        if not specimens_plot:
+            return
+
+    color_by_name = specimen_color_by_name_map(catalog)
+    specimens_ordered = specimen_names_in_plot_order(catalog, specimens_plot)
+    specimen_handles = [
+        Line2D(
+            [0],
+            [0],
+            marker="o",
+            color="w",
+            markerfacecolor=color_by_name[s],
+            markersize=8,
+            markeredgewidth=0.5,
+            markeredgecolor="0.35",
+            label=s,
+        )
+        for s in specimens_ordered
+    ]
+
+    def _finite_pairs(xs: list[float], ys: list[float]) -> tuple[list[float], list[float]]:
+        out_x: list[float] = []
+        out_y: list[float] = []
+        for x, y in zip(xs, ys):
+            if np.isfinite(x) and np.isfinite(y):
+                out_x.append(float(x))
+                out_y.append(float(y))
+        return (out_x, out_y)
+
+    y_tex = r"$P/(f_y A_{sc})$"
+
+    has_pts = False
+    with plt.rc_context(b_vs_geometry_rcparams()):
+        fig, (ax_n, ax_p) = plt.subplots(
+            2,
+            1,
+            sharex=True,
+            figsize=(_B_VS_CYCLE_AMP_FIG_W_IN, GRID_AX_H_IN * 2.0),
+        )
+        all_n: list[float] = []
+        all_p: list[float] = []
+        for sid in specimens_plot:
+            if sid not in catalog_by_name.index:
+                continue
+            Ly = float(catalog_by_name.loc[sid]["L_y_in"])
+            if not np.isfinite(Ly) or Ly <= 0:
+                continue
+            col = color_by_name.get(sid, (0.5, 0.5, 0.5, 1.0))
+            rec = get_specimen_record(sid, catalog)
+            if extended and uses_unordered_inputs(rec):
+                continue
+
+            met = get_b_segment_scatter_metrics_one_specimen(sid)
+            if met is None:
+                continue
+            yn = met["stress_norm_origin_n"]  # type: ignore[assignment]
+            yp = met["stress_norm_origin_p"]  # type: ignore[assignment]
+            xn_list = list(met[kn])  # type: ignore[arg-type]
+            xp_list = list(met[kp])  # type: ignore[arg-type]
+
+            xxn, yyn = _finite_pairs(xn_list, yn)
+            if xxn:
+                ax_n.scatter(xxn, yyn, c=[col] * len(yyn), s=56, edgecolors="white", linewidths=0.45, zorder=2)
+                all_n.extend(yyn)
+                has_pts = True
+            xxp, yyp = _finite_pairs(xp_list, yp)
+            if xxp:
+                ax_p.scatter(xxp, yyp, c=[col] * len(yyp), s=56, edgecolors="white", linewidths=0.45, zorder=2)
+                all_p.extend(yyp)
+                has_pts = True
+
+        mean_n = float(np.mean(all_n)) if all_n else float("nan")
+        mean_p = float(np.mean(all_p)) if all_p else float("nan")
+
+        # Compression: $P/(f_y A_{sc})$ in $[0,-2]$ with negative direction upward; tension: $[0,2]$.
+        ax_n.set_ylim(-2.0, 0.0)
+        ax_n.invert_yaxis()
+        ax_p.set_ylim(0.0, 2.0)
+
+        for ax, mline in [(ax_n, mean_n), (ax_p, mean_p)]:
+            ax.grid(True, alpha=0.3)
+            style_axes_spines_and_ticks(ax)
+            if np.isfinite(mline):
+                ax.axhline(mline, color="0.45", linestyle="-", linewidth=1.1, zorder=0)
+
+        ax_n.set_ylabel(y_tex)
+        ax_p.set_ylabel(y_tex)
+        ax_p.set_xlabel(xlabel)
+        ax_p.xaxis.set_major_locator(MaxNLocator(nbins=6))
+        ax_p.xaxis.set_major_formatter(FuncFormatter(_format_x_3sig))
+        leg: list = [
+            Line2D(
+                [0],
+                [0],
+                color="0.45",
+                linestyle="-",
+                linewidth=1.2,
+                label="Cohort mean (per panel)",
+            )
+        ]
+        if extended:
+            leg.append(
+                Line2D(
+                    [0],
+                    [0],
+                    marker="o",
+                    color="0.35",
+                    linestyle="none",
+                    markersize=8,
+                    label="Ordered (path)",
+                )
+            )
+        leg.extend(specimen_handles)
+        fig.subplots_adjust(
+            left=0.10,
+            right=0.60,
+            top=0.97,
+            bottom=0.14,
+            hspace=0.12,
+        )
+        fig.legend(
+            handles=leg,
+            loc="center left",
+            bbox_to_anchor=(0.62, 0.5),
+            bbox_transform=fig.transFigure,
+            ncol=1,
+            frameon=False,
+            handletextpad=0.35,
+            borderaxespad=0,
+        )
+        if has_pts:
+            fig.savefig(
+                out_dir / fname,
+                dpi=SAVE_DPI,
+                bbox_inches="tight",
+                pad_inches=0.18,
+            )
+        plt.close(fig)
+
+    print(f"Wrote {fname} under {out_dir.resolve()}")
+
+
+def plot_sigma0_norm_vs_abscissa(
+    out_dir: Path,
+    *,
+    extended: bool = False,
+    abscissa: Literal["amp_fit", "plastic", "plastic_opp", "cum_def", "cum_inel"] = "amp_fit",
+    metric_variant: Literal["sigma0", "equiv_sigma0"] = "sigma0",
+) -> None:
+    """
+    $\\sigma_0/f_y$ or $\\sigma_0^{\\mathrm{eq}}/f_y$ (plastic-line / elastic-asymptote intersection) vs the same
+    abscissas as ``plot_bn_bp_vs_abscissa``. Same y-axis limits and inversion as ``plot_norm_stress_origin_elastic_vs_abscissa``.
+
+    ``metric_variant="sigma0"``: elastic anchor from the latest opposite cycle peak before plastic (segment metric).
+    ``metric_variant="equiv_sigma0"``: elastic from global max compressive / max tensile deformation.
+    """
+    out_dir.mkdir(parents=True, exist_ok=True)
+    stem_prefix = "sigma0_norm" if metric_variant == "sigma0" else "equiv_sigma0_norm"
+    y_tex = r"$\sigma_0$" if metric_variant == "sigma0" else r"$\sigma_0^{\mathrm{eq}}$"
+    yn_key = "sigma0_norm_n" if metric_variant == "sigma0" else "equiv_sigma0_norm_n"
+    yp_key = "sigma0_norm_p" if metric_variant == "sigma0" else "equiv_sigma0_norm_p"
+    if abscissa == "amp_fit":
+        stem = f"{stem_prefix}_vs_cycle_amplitude_norm_hat_delta_y"
+        xlabel = r"$\delta_c^{\max}/\hat{\delta}_y$"
+        kn, kp = "x_amp_fit_ratio_n", "x_amp_fit_ratio_p"
+    elif abscissa == "plastic":
+        stem = f"{stem_prefix}_vs_plastic_strain_norm_hat_delta_y"
+        xlabel = r"$(\delta_c^{\max}-\hat{\delta}_y)/\hat{\delta}_y$"
+        kn, kp = "x_plastic_ratio_n", "x_plastic_ratio_p"
+    elif abscissa == "plastic_opp":
+        stem = f"{stem_prefix}_vs_plastic_strain_prior_opp_peak_norm_hat_delta_y"
+        xlabel = r"$(\delta^{\mathrm{opp}}_{\mathrm{prior}}-\hat{\delta}_y)/\hat{\delta}_y$"
+        kn, kp = "x_plastic_opp_ratio_n", "x_plastic_opp_ratio_p"
+    elif abscissa == "cum_def":
+        stem = f"{stem_prefix}_vs_cum_deformation_ratio"
+        xlabel = r"$\sum|\Delta\delta|/\hat{\delta}_y$"
+        kn, kp = "x_cum_def_ratio_n", "x_cum_def_ratio_p"
+    else:
+        stem = f"{stem_prefix}_vs_cum_inelastic_deformation_ratio"
+        xlabel = r"$\sum|\Delta\delta_{\mathrm{inel}}|/\hat{\delta}_y$"
+        kn, kp = "x_cum_inel_ratio_n", "x_cum_inel_ratio_p"
+    fname = f"{stem}_extended.png" if extended else f"{stem}.png"
+
+    catalog = read_catalog()
+    catalog_by_name = catalog.set_index("Name")
+
+    if extended:
+        if not PARAMS_CSV.is_file():
+            return
+        app = pd.read_csv(PARAMS_CSV)
+        in_app = set(app["Name"].astype(str))
+        specimens_plot = [n for n in catalog.sort_values("ID")["Name"].astype(str) if n in in_app]
+    else:
+        specimens_plot = sorted(get_specimens_with_resampled())
+        if not specimens_plot:
+            return
+
+    color_by_name = specimen_color_by_name_map(catalog)
+    specimens_ordered = specimen_names_in_plot_order(catalog, specimens_plot)
+    specimen_handles = [
+        Line2D(
+            [0],
+            [0],
+            marker="o",
+            color="w",
+            markerfacecolor=color_by_name[s],
+            markersize=8,
+            markeredgewidth=0.5,
+            markeredgecolor="0.35",
+            label=s,
+        )
+        for s in specimens_ordered
+    ]
+
+    def _finite_pairs(xs: list[float], ys: list[float]) -> tuple[list[float], list[float]]:
+        out_x: list[float] = []
+        out_y: list[float] = []
+        for x, y in zip(xs, ys):
+            if np.isfinite(x) and np.isfinite(y):
+                out_x.append(float(x))
+                out_y.append(float(y))
+        return (out_x, out_y)
+
+    has_pts = False
+    with plt.rc_context(b_vs_geometry_rcparams()):
+        fig, (ax_n, ax_p) = plt.subplots(
+            2,
+            1,
+            sharex=True,
+            figsize=(_B_VS_CYCLE_AMP_FIG_W_IN, GRID_AX_H_IN * 2.0),
+        )
+        all_n: list[float] = []
+        all_p: list[float] = []
+        for sid in specimens_plot:
+            if sid not in catalog_by_name.index:
+                continue
+            Ly = float(catalog_by_name.loc[sid]["L_y_in"])
+            if not np.isfinite(Ly) or Ly <= 0:
+                continue
+            col = color_by_name.get(sid, (0.5, 0.5, 0.5, 1.0))
+            rec = get_specimen_record(sid, catalog)
+            if extended and uses_unordered_inputs(rec):
+                continue
+
+            met = get_b_segment_scatter_metrics_one_specimen(sid)
+            if met is None:
+                continue
+            yn = met[yn_key]  # type: ignore[literal-required]
+            yp = met[yp_key]  # type: ignore[literal-required]
+            xn_list = list(met[kn])  # type: ignore[arg-type]
+            xp_list = list(met[kp])  # type: ignore[arg-type]
+
+            xxn, yyn = _finite_pairs(xn_list, yn)
+            if xxn:
+                ax_n.scatter(xxn, yyn, c=[col] * len(yyn), s=56, edgecolors="white", linewidths=0.45, zorder=2)
+                all_n.extend(yyn)
+                has_pts = True
+            xxp, yyp = _finite_pairs(xp_list, yp)
+            if xxp:
+                ax_p.scatter(xxp, yyp, c=[col] * len(yyp), s=56, edgecolors="white", linewidths=0.45, zorder=2)
+                all_p.extend(yyp)
+                has_pts = True
+
+        mean_n = float(np.mean(all_n)) if all_n else float("nan")
+        mean_p = float(np.mean(all_p)) if all_p else float("nan")
+
+        ax_n.set_ylim(-2.0, 0.0)
+        ax_n.invert_yaxis()
+        ax_p.set_ylim(0.0, 2.0)
+
+        for ax, mline in [(ax_n, mean_n), (ax_p, mean_p)]:
+            ax.grid(True, alpha=0.3)
+            style_axes_spines_and_ticks(ax)
+            if np.isfinite(mline):
+                ax.axhline(mline, color="0.45", linestyle="-", linewidth=1.1, zorder=0)
+
+        ax_n.set_ylabel(y_tex)
+        ax_p.set_ylabel(y_tex)
+        ax_p.set_xlabel(xlabel)
+        ax_p.xaxis.set_major_locator(MaxNLocator(nbins=6))
+        ax_p.xaxis.set_major_formatter(FuncFormatter(_format_x_3sig))
+        leg: list = [
+            Line2D(
+                [0],
+                [0],
+                color="0.45",
+                linestyle="-",
+                linewidth=1.2,
+                label="Cohort mean (per panel)",
+            )
+        ]
+        if extended:
+            leg.append(
+                Line2D(
+                    [0],
+                    [0],
+                    marker="o",
+                    color="0.35",
+                    linestyle="none",
+                    markersize=8,
+                    label="Ordered (path)",
+                )
+            )
+        leg.extend(specimen_handles)
+        fig.subplots_adjust(
+            left=0.10,
+            right=0.60,
+            top=0.97,
+            bottom=0.14,
+            hspace=0.12,
+        )
+        fig.legend(
+            handles=leg,
+            loc="center left",
+            bbox_to_anchor=(0.62, 0.5),
+            bbox_transform=fig.transFigure,
+            ncol=1,
+            frameon=False,
+            handletextpad=0.35,
+            borderaxespad=0,
+        )
+        if has_pts:
+            fig.savefig(
+                out_dir / fname,
+                dpi=SAVE_DPI,
+                bbox_inches="tight",
+                pad_inches=0.18,
+            )
+        plt.close(fig)
+
+    print(f"Wrote {fname} under {out_dir.resolve()}")
+
+
 def plot_b_vs_cycle_amplitude(out_dir: Path, *, extended: bool = False) -> None:
     """Backward-compatible name: same as ``plot_bn_bp_vs_abscissa`` with ``abscissa='amp_fit'``."""
     plot_bn_bp_vs_abscissa(out_dir, extended=extended, abscissa="amp_fit")
@@ -701,9 +1135,9 @@ def plot_scatter_bn_bp_digitized(df: pd.DataFrame, out_dir: Path) -> None:
         return
     df = _geometry_augment_for_scatter(df)
     if "Name" in df.columns:
-        specimens = sorted(df["Name"].astype(str).unique())
-        cmap = plt.colormaps["tab10"]
-        specimen_color = {s: cmap((i % 10) / 9.0) for i, s in enumerate(specimens)}
+        _cat = read_catalog()
+        specimen_color = specimen_color_by_name_map(_cat)
+        specimens = specimen_names_in_plot_order(_cat, df["Name"].dropna().astype(str).unique())
         specimen_handles = [
             Line2D(
                 [0],
@@ -818,11 +1252,12 @@ def plot_scatter_bn_bp_combined(
     specimens = sorted(names_seg | names_env)
     if not specimens:
         return
-    cmap = plt.colormaps["tab10"]
-    specimen_color = {s: cmap((i % 10) / 9.0) for i, s in enumerate(specimens)}
+    _cat = read_catalog()
+    specimen_color = specimen_color_by_name_map(_cat)
+    specimens_legend = specimen_names_in_plot_order(_cat, specimens)
     specimen_handles = [
         Line2D([0], [0], marker="o", color="w", markerfacecolor=specimen_color[s], markersize=8, markeredgewidth=0, label=s)
-        for s in specimens
+        for s in specimens_legend
     ]
     seg_label = f"Resampled {_stat_label_word(segment_stat)}"
 
@@ -968,10 +1403,9 @@ def plot_box_bn_bp(
     b_data: dict[str, tuple[list[float], list[float]]] = {
         sid: _get_b_lists_spec(sid) for sid in specimen_ids
     }
-    # Same specimen color scheme as scatter (tab10)
-    specimens = sorted(df["Name"].astype(str).unique())
-    cmap = plt.colormaps["tab10"]
-    specimen_color = {s: cmap((i % 10) / 9.0) for i, s in enumerate(specimens)}
+    _cat = read_catalog()
+    specimen_color = specimen_color_by_name_map(_cat)
+    specimens = specimen_names_in_plot_order(_cat, df["Name"].astype(str).unique())
     fallback_color = "#0077BB"  # used only if a specimen is missing from map
     specimen_handles = [
         Line2D([0], [0], marker="o", color="w", markerfacecolor=specimen_color[s], markersize=8, markeredgewidth=0, label=s)
@@ -1096,12 +1530,40 @@ def main() -> None:
         for stat in SEGMENT_STATS_ORDER:
             plot_scatter_bn_bp(df, B_VS_GEOMETRY_DIR, segment_stat=stat)
         plot_box_bn_bp(df, B_VS_GEOMETRY_DIR)
-        for _ab in ("amp_fit", "plastic", "cum_def", "cum_inel"):
+        for _ab in ("amp_fit", "plastic", "plastic_opp", "cum_def", "cum_inel"):
             plot_bn_bp_vs_abscissa(B_VS_CYCLE_AMP_DIR, extended=False, abscissa=_ab)
             plot_bn_bp_vs_abscissa(B_VS_CYCLE_AMP_DIR, extended=True, abscissa=_ab)
+            plot_norm_stress_origin_elastic_vs_abscissa(
+                NORM_STRESS_ORIGIN_ELASTIC_VS_CYCLE_DIR, extended=False, abscissa=_ab
+            )
+            plot_norm_stress_origin_elastic_vs_abscissa(
+                NORM_STRESS_ORIGIN_ELASTIC_VS_CYCLE_DIR, extended=True, abscissa=_ab
+            )
+            plot_sigma0_norm_vs_abscissa(
+                NORM_SIGMA0_VS_CYCLE_DIR, extended=False, abscissa=_ab
+            )
+            plot_sigma0_norm_vs_abscissa(
+                NORM_SIGMA0_VS_CYCLE_DIR, extended=True, abscissa=_ab
+            )
+            plot_sigma0_norm_vs_abscissa(
+                EQUIV_NORM_SIGMA0_VS_CYCLE_DIR,
+                extended=False,
+                abscissa=_ab,
+                metric_variant="equiv_sigma0",
+            )
+            plot_sigma0_norm_vs_abscissa(
+                EQUIV_NORM_SIGMA0_VS_CYCLE_DIR,
+                extended=True,
+                abscissa=_ab,
+                metric_variant="equiv_sigma0",
+            )
         print(f"Scatter and box plots saved to {B_VS_GEOMETRY_DIR}")
         print(
-            f"B vs amplitude / plastic strain / cumulative deformation plots saved to {B_VS_CYCLE_AMP_DIR}"
+            f"B vs amplitude / plastic strain / prior-opp plastic / cumulative deformation plots saved to {B_VS_CYCLE_AMP_DIR}"
+        )
+        print(
+            f"Origin-elastic / sigma_0 / sigma_0^eq vs same abscissas as b_vs_cycle -> "
+            f"{NORM_STRESS_ORIGIN_ELASTIC_VS_CYCLE_DIR}, {NORM_SIGMA0_VS_CYCLE_DIR}, {EQUIV_NORM_SIGMA0_VS_CYCLE_DIR}"
         )
         if not args.skip_digitized_scatter:
             ddf = build_digitized_envelope_bn_table(_PROJECT_ROOT)

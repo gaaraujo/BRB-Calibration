@@ -36,7 +36,11 @@ sys.path.insert(0, str(_SCRIPTS / "postprocess"))
 
 from calibrate.pipeline_log import line, run_banner, section  # noqa: E402
 from calibrate.amplitude_mse_partition import build_amplitude_weights  # noqa: E402
-from calibrate.optimize_brb_mse import AMPLITUDE_WEIGHTS_ARG_HELP, force_scale_s_f  # noqa: E402
+from calibrate.optimize_brb_mse import (  # noqa: E402
+    AMPLITUDE_WEIGHTS_ARG_HELP,
+    force_scale_s_f,
+    run_simulation_kwargs_from_prow,
+)
 from calibrate.debug_sim_cache import (  # noqa: E402
     save_fsim_cache,
     try_load_cached_fsim,
@@ -55,11 +59,16 @@ from model.corotruss import run_simulation  # noqa: E402
 from postprocess.cycle_points import find_cycle_points, load_cycle_points_resampled  # noqa: E402
 from postprocess.plot_dimensions import (  # noqa: E402
     COLOR_EXPERIMENTAL,
+    HYSTERESIS_LINEWIDTH_SCALE,
+    LEGEND_FONT_SIZE_SINGLE_AX_PT,
     SAVE_DPI,
+    SINGLE_AX_PLOT_FRAME_TICK_FONT_SCALE,
     SINGLE_FIGSIZE_IN,
     configure_matplotlib_style,
-    style_axes_spines_and_ticks,
+    single_axis_style_context,
+    style_single_axis_spines,
 )
+from postprocess.specimen_colors import distinct_colors_rgba  # noqa: E402
 from postprocess.plot_specimens import (  # noqa: E402
     NORM_FORCE_LABEL,
     NORM_STRAIN_LABEL,
@@ -93,12 +102,6 @@ def _meta_cycle_weight_w_c(meta_row: dict) -> float:
     if not np.isfinite(w) or w <= 0.0:
         return 1.0
     return w
-
-
-def _row_to_sim_params(prow: pd.Series) -> dict:
-    """Map params CSV row to run_simulation keyword arguments."""
-    keys = ("L_T", "L_y", "A_sc", "A_t", "fyp", "fyn", "E", "b_p", "b_n", "R0", "cR1", "cR2", "a1", "a2", "a3", "a4")
-    return {k: float(prow[k]) for k in keys}
 
 
 def plot_landmark_overlay(
@@ -145,29 +148,61 @@ def plot_landmark_overlay(
     s_f = float(force_scale_s_f(F_exp))
     s_d = float(deformation_scale_s_d(D_exp))
 
-    fig, ax = plt.subplots(figsize=SINGLE_FIGSIZE_IN)
-    ax.plot(
-        D_n,
-        F_e_n,
-        color=COLOR_EXPERIMENTAL,
-        linewidth=0.9,
-        alpha=0.95,
-    )
-    ax.plot(
-        D_n,
-        F_s_n,
-        color=COLOR_SIMULATED,
-        linewidth=0.9,
-        linestyle="--",
-        alpha=0.95,
-    )
+    with single_axis_style_context():
+        fig, ax = plt.subplots(figsize=SINGLE_FIGSIZE_IN)
+        ax.plot(
+            D_n,
+            F_e_n,
+            color=COLOR_EXPERIMENTAL,
+            linewidth=0.9 * HYSTERESIS_LINEWIDTH_SCALE,
+            alpha=0.95,
+        )
+        ax.plot(
+            D_n,
+            F_s_n,
+            color=COLOR_SIMULATED,
+            linewidth=0.9 * HYSTERESIS_LINEWIDTH_SCALE,
+            linestyle="--",
+            alpha=0.95,
+        )
 
-    cmap = plt.get_cmap("tab10")
-    for k, m in enumerate(meta):
-        s, e = int(m["start"]), int(m["end"])
-        if e <= s:
-            le = [None] * N_LANDMARK_SLOTS
-            ls = [None] * N_LANDMARK_SLOTS
+        cycle_colors = distinct_colors_rgba(len(meta))
+        for k, m in enumerate(meta):
+            s, e = int(m["start"]), int(m["end"])
+            if e <= s:
+                le = [None] * N_LANDMARK_SLOTS
+                ls = [None] * N_LANDMARK_SLOTS
+                if exp_csv_rows is not None:
+                    exp_csv_rows.append(
+                        landmark_exp_row_dict(
+                            specimen_id,
+                            set_id,
+                            k,
+                            m,
+                            le,
+                            fy_ksi=fyp,
+                            a_sc=a_sc,
+                            ls=ls,
+                            w_c=_meta_cycle_weight_w_c(m),
+                            j_feat_l2_mean=float("nan"),
+                            j_feat_l1_mean=float("nan"),
+                            n_jfeat_slots=0,
+                            jfeat_contributes=False,
+                        )
+                    )
+                continue
+            color = cycle_colors[k]
+
+            le = extract_cycle_landmarks(
+                D_exp, F_exp, s, e, fy_ksi=fyp, a_sc=a_sc, dy_in=dy_in
+            )
+            ls, le_m = pair_sim_cycle_landmarks(
+                D_exp, F_exp, F_sim, s, e, le, fy_ksi=fyp, a_sc=a_sc
+            )
+
+            j2, j1, n_jf = jfeat_means_from_paired_landmarks(le_m, ls, s_f, s_d)
+            w_c = _meta_cycle_weight_w_c(m)
+
             if exp_csv_rows is not None:
                 exp_csv_rows.append(
                     landmark_exp_row_dict(
@@ -175,160 +210,129 @@ def plot_landmark_overlay(
                         set_id,
                         k,
                         m,
-                        le,
+                        le_m,
                         fy_ksi=fyp,
                         a_sc=a_sc,
                         ls=ls,
-                        w_c=_meta_cycle_weight_w_c(m),
-                        j_feat_l2_mean=float("nan"),
-                        j_feat_l1_mean=float("nan"),
-                        n_jfeat_slots=0,
-                        jfeat_contributes=False,
+                        w_c=w_c,
+                        j_feat_l2_mean=j2,
+                        j_feat_l1_mean=j1,
+                        n_jfeat_slots=n_jf,
+                        jfeat_contributes=n_jf > 0,
                     )
                 )
-            continue
-        color = cmap(k % 10)
 
-        le = extract_cycle_landmarks(
-            D_exp, F_exp, s, e, fy_ksi=fyp, a_sc=a_sc, dy_in=dy_in
-        )
-        ls, le_m = pair_sim_cycle_landmarks(
-            D_exp, F_exp, F_sim, s, e, le, fy_ksi=fyp, a_sc=a_sc
-        )
-
-        j2, j1, n_jf = jfeat_means_from_paired_landmarks(le_m, ls, s_f, s_d)
-        w_c = _meta_cycle_weight_w_c(m)
-
-        if exp_csv_rows is not None:
-            exp_csv_rows.append(
-                landmark_exp_row_dict(
-                    specimen_id,
-                    set_id,
-                    k,
-                    m,
-                    le_m,
-                    fy_ksi=fyp,
-                    a_sc=a_sc,
-                    ls=ls,
-                    w_c=w_c,
-                    j_feat_l2_mean=j2,
-                    j_feat_l1_mean=j1,
-                    n_jfeat_slots=n_jf,
-                    jfeat_contributes=n_jf > 0,
-                )
-            )
-
-        for slot in range(N_LANDMARK_SLOTS):
-            label = str(slot + 1)
-            if le_m[slot] is not None and ls[slot] is not None:
-                d_e, f_e = le_m[slot]
-                d_s, f_s = ls[slot]
-                if all(np.isfinite(x) for x in (d_e, f_e, d_s, f_s)):
-                    ax.plot(
-                        [d_e / L_yf, d_s / L_yf],
-                        [f_e / fyA, f_s / fyA],
+            for slot in range(N_LANDMARK_SLOTS):
+                label = str(slot + 1)
+                if le_m[slot] is not None and ls[slot] is not None:
+                    d_e, f_e = le_m[slot]
+                    d_s, f_s = ls[slot]
+                    if all(np.isfinite(x) for x in (d_e, f_e, d_s, f_s)):
+                        ax.plot(
+                            [d_e / L_yf, d_s / L_yf],
+                            [f_e / fyA, f_s / fyA],
+                            color=color,
+                            linestyle="-",
+                            linewidth=0.65 * HYSTERESIS_LINEWIDTH_SCALE,
+                            alpha=0.55,
+                            zorder=5,
+                            solid_capstyle="round",
+                        )
+                if le_m[slot] is not None:
+                    d, f = le_m[slot]
+                    ax.scatter(
+                        [d / L_yf],
+                        [f / fyA],
+                        c=[color],
+                        s=18,
+                        marker="o",
+                        edgecolors="0.2",
+                        linewidths=0.35,
+                        zorder=6,
+                    )
+                    ax.annotate(
+                        label,
+                        (d / L_yf, f / fyA),
+                        textcoords="offset points",
+                        xytext=(3, 2),
+                        fontsize=max(2.5, 4.25 * SINGLE_AX_PLOT_FRAME_TICK_FONT_SCALE),
                         color=color,
-                        linestyle="-",
-                        linewidth=0.65,
-                        alpha=0.55,
-                        zorder=5,
-                        solid_capstyle="round",
+                        alpha=0.95,
                     )
-            if le_m[slot] is not None:
-                d, f = le_m[slot]
-                ax.scatter(
-                    [d / L_yf],
-                    [f / fyA],
-                    c=[color],
-                    s=18,
-                    marker="o",
-                    edgecolors="0.2",
-                    linewidths=0.35,
-                    zorder=6,
-                )
-                ax.annotate(
-                    label,
-                    (d / L_yf, f / fyA),
-                    textcoords="offset points",
-                    xytext=(3, 2),
-                    fontsize=4.25,
-                    color=color,
-                    alpha=0.95,
-                )
-            if ls[slot] is not None:
-                d, f = ls[slot]
-                ax.scatter(
-                    [d / L_yf],
-                    [f / fyA],
-                    c=[color],
-                    s=22,
-                    marker="^",
-                    edgecolors="0.2",
-                    linewidths=0.35,
-                    zorder=6,
-                )
-                ax.annotate(
-                    label,
-                    (d / L_yf, f / fyA),
-                    textcoords="offset points",
-                    xytext=(-5, -7),
-                    fontsize=4.25,
-                    color=color,
-                    alpha=0.95,
-                )
+                if ls[slot] is not None:
+                    d, f = ls[slot]
+                    ax.scatter(
+                        [d / L_yf],
+                        [f / fyA],
+                        c=[color],
+                        s=22,
+                        marker="^",
+                        edgecolors="0.2",
+                        linewidths=0.35,
+                        zorder=6,
+                    )
+                    ax.annotate(
+                        label,
+                        (d / L_yf, f / fyA),
+                        textcoords="offset points",
+                        xytext=(-5, -7),
+                        fontsize=max(2.5, 4.25 * SINGLE_AX_PLOT_FRAME_TICK_FONT_SCALE),
+                        color=color,
+                        alpha=0.95,
+                    )
 
-    set_symmetric_axes(ax, D_n, np.concatenate([F_e_n, F_s_n]))
-    ax.set_xlabel(NORM_STRAIN_LABEL)
-    ax.set_ylabel(NORM_FORCE_LABEL)
-    apply_normalized_fu_axes(ax)
-    ax.axhline(0.0, color="k", linewidth=0.45, alpha=0.45)
-    ax.grid(True, alpha=0.28)
-    legend_handles = [
-        Line2D([0], [0], color=COLOR_EXPERIMENTAL, lw=0.85, label="Exp. (hysteresis)"),
-        Line2D([0], [0], color=COLOR_SIMULATED, lw=0.85, ls="--", label="Sim. (hysteresis)"),
-        Line2D(
-            [0],
-            [0],
-            linestyle="none",
-            marker="o",
-            markerfacecolor=COLOR_EXPERIMENTAL,
-            markeredgecolor="0.2",
-            markeredgewidth=0.35,
-            markersize=4.0,
-            label="Exp. landmark",
-        ),
-        Line2D(
-            [0],
-            [0],
-            linestyle="none",
-            marker="^",
-            markerfacecolor=COLOR_SIMULATED,
-            markeredgecolor="0.2",
-            markeredgewidth=0.35,
-            markersize=4.25,
-            label="Sim. landmark",
-        ),
-    ]
-    leg = ax.legend(
-        handles=legend_handles,
-        loc="upper left",
-        bbox_to_anchor=(1.02, 1.0),
-        fontsize=5,
-        handlelength=1.5,
-        handletextpad=0.45,
-        borderpad=0.3,
-        frameon=True,
-    )
-    style_axes_spines_and_ticks(ax)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(
-        out_path,
-        dpi=SAVE_DPI,
-        bbox_inches="tight",
-        bbox_extra_artists=(leg,),
-        pad_inches=0.08,
-    )
-    plt.close(fig)
+        set_symmetric_axes(ax, D_n, np.concatenate([F_e_n, F_s_n]))
+        ax.set_xlabel(NORM_STRAIN_LABEL)
+        ax.set_ylabel(NORM_FORCE_LABEL)
+        apply_normalized_fu_axes(ax)
+        ax.axhline(0.0, color="k", linewidth=0.45, alpha=0.45)
+        ax.grid(True, alpha=0.28)
+        legend_handles = [
+            Line2D([0], [0], color=COLOR_EXPERIMENTAL, lw=0.85, label="Exp. (hysteresis)"),
+            Line2D([0], [0], color=COLOR_SIMULATED, lw=0.85, ls="--", label="Sim. (hysteresis)"),
+            Line2D(
+                [0],
+                [0],
+                linestyle="none",
+                marker="o",
+                markerfacecolor=COLOR_EXPERIMENTAL,
+                markeredgecolor="0.2",
+                markeredgewidth=0.35,
+                markersize=4.0 * SINGLE_AX_PLOT_FRAME_TICK_FONT_SCALE,
+                label="Exp. landmark",
+            ),
+            Line2D(
+                [0],
+                [0],
+                linestyle="none",
+                marker="^",
+                markerfacecolor=COLOR_SIMULATED,
+                markeredgecolor="0.2",
+                markeredgewidth=0.35,
+                markersize=4.25 * SINGLE_AX_PLOT_FRAME_TICK_FONT_SCALE,
+                label="Sim. landmark",
+            ),
+        ]
+        leg = ax.legend(
+            handles=legend_handles,
+            loc="upper left",
+            bbox_to_anchor=(1.02, 1.0),
+            fontsize=LEGEND_FONT_SIZE_SINGLE_AX_PT,
+            handlelength=1.5,
+            handletextpad=0.45,
+            borderpad=0.3,
+            frameon=True,
+        )
+        style_single_axis_spines(ax)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(
+            out_path,
+            dpi=SAVE_DPI,
+            bbox_inches="tight",
+            bbox_extra_artists=(leg,),
+            pad_inches=0.08,
+        )
+        plt.close(fig)
 
 
 def main() -> None:
@@ -412,7 +416,7 @@ def main() -> None:
 
         for _, prow in rows.iterrows():
             set_id = prow.get("set_id", "?")
-            sim_kw = _row_to_sim_params(prow)
+            sm, sim_kw = run_simulation_kwargs_from_prow(prow)
             F_sim = None
             if args.sim_cache:
                 F_sim = try_load_cached_fsim(out_dir, sid, set_id, params_path, sim_kw)
@@ -420,7 +424,7 @@ def main() -> None:
                     line(f"{sid} set {set_id}: using cached F_sim (--sim-cache)")
             if F_sim is None:
                 try:
-                    F_sim = np.asarray(run_simulation(D_exp, **sim_kw), dtype=float)
+                    F_sim = np.asarray(run_simulation(D_exp, steel_model=sm, **sim_kw), dtype=float)
                 except Exception as e:
                     line(f"{sid} set {set_id}: simulation failed ({e})")
                     continue

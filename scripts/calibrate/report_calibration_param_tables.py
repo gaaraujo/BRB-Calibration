@@ -1,12 +1,23 @@
 """
-Write Markdown tables of ``PARAMS_IN_SUMMARY_TABLES`` (SteelMPF order: ``b_p``, ``b_n``, then ``PARAMS_TO_OPTIMIZE``, ``a2``, ``a4``)
-by calibration ``set_id`` (default 1–10; match ``set_id_settings.csv``).
+Write Markdown tables of optimized steel parameters by calibration ``set_id`` (default: all
+``set_id`` values in ``set_id_settings.csv``).
 
-**Generalized** rows: one value per ``set_id`` for the optimized parameter subset (default ``PARAMS_TO_OPTIMIZE``; optional per-``set_id`` overrides via ``set_id_settings.csv``). ``b_p`` / ``b_n`` remain per-specimen in the merged CSV when they are not part of that shared vector, so their ``optimum_value`` column is left blank in that case.
-The generalized Markdown table also appends **specimen-weighted mean** eval metrics per ``set_id`` (raw ``J_feat`` / ``J_E`` / ``J_binenv`` L2 and L1, ``J_total`` from ``generalized_params_eval_metrics.csv``).
+**Steel model split:** ``steelmpf`` and ``steel4`` use different tabulated columns (Steel4 adds ``STEEL4_ISO_KEYS``; see
+``params_in_summary_tables_for_steel_model``). When more than one
+``steel_model`` appears among the selected ``set_id`` rows in ``set_id_settings.csv`` **and**
+both have generalized + individual rows, this script writes **separate** Markdown + CSV
+stems ``{base}_{steel_model}.*`` plus a short ``{base}.md`` index linking them. A single
+``steel_model`` among the selected sets keeps the legacy layout ``{base}.md`` and
+``{base}_generalized.csv`` (no suffix).
+
+**Generalized** rows: one value per ``set_id`` for the optimized parameter subset (default ``PARAMS_TO_OPTIMIZE``;
+optional per-``set_id`` overrides via ``set_id_settings.csv``). ``b_p`` / ``b_n`` remain per-specimen in the merged CSV
+when they are not part of that shared vector, so their ``optimum_value`` column is left blank in that case.
+The generalized Markdown table also appends **specimen-weighted mean** eval metrics per ``set_id`` (raw ``J_feat`` /
+``J_E`` / ``J_binenv`` L2 and L1, ``J_total`` from ``generalized_params_eval_metrics.csv``).
 **Individual** rows: mean across specimen rows with finite optimized parameters for that ``set_id``.
 
-With ``--write report.md``, also writes CSV summaries next to the Markdown:
+With ``--write report.md``, also writes CSV summaries next to each Markdown stem:
 **Rollup (one row per parameter):** ``{stem}_generalized.csv``, ``{stem}_individual.csv`` — columns
 ``parameter``, ``mean``, ``min``, ``max`` across the selected sets (same definitions as the Markdown summary tables).
 **By set_id (one row per set):** ``{stem}_generalized_by_set.csv`` (shared parameters + specimen-weighted eval
@@ -46,7 +57,14 @@ from calibrate.calibration_paths import (  # noqa: E402
     OPTIMIZED_BRB_PARAMETERS_PATH,
     SET_ID_SETTINGS_CSV,
 )
-from calibrate.params_to_optimize import PARAMS_IN_SUMMARY_TABLES  # noqa: E402
+from calibrate.params_to_optimize import params_in_summary_tables_for_steel_model  # noqa: E402
+from calibrate.set_id_settings import read_set_id_settings_table  # noqa: E402
+from calibrate.steel_model import (  # noqa: E402
+    STEEL_MODEL_STEEL4,
+    STEEL_MODEL_STEELMPF,
+    normalize_steel_model,
+    ordered_steel_model_subdirs,
+)
 
 GENERALIZED_PER_SET_METRICS: list[tuple[str, str]] = [
     ("final_J_feat_raw", "J_feat"),
@@ -57,6 +75,54 @@ GENERALIZED_PER_SET_METRICS: list[tuple[str, str]] = [
     ("final_unordered_J_binenv", "J_binenv"),
     ("final_unordered_J_binenv_l1", "J_binenv_L1"),
 ]
+
+
+def _load_set_id_to_steel_model(settings_csv: Path) -> dict[int, str]:
+    """``set_id`` -> normalized ``steel_model`` from ``set_id_settings.csv`` (defaults to steelmpf)."""
+    df = read_set_id_settings_table(settings_csv)
+    if "set_id" not in df.columns:
+        return {}
+    out: dict[int, str] = {}
+    for _, r in df.iterrows():
+        if pd.isna(r.get("set_id")):
+            continue
+        sid = int(pd.to_numeric(r["set_id"], errors="coerce"))
+        if "steel_model" in df.columns and pd.notna(r.get("steel_model")):
+            out[sid] = normalize_steel_model(r.get("steel_model"))
+        else:
+            out[sid] = STEEL_MODEL_STEELMPF
+    return out
+
+
+def _steel_model_series_for_df(df: pd.DataFrame, set_id_to_sm: dict[int, str]) -> pd.Series:
+    """Per-row normalized ``steel_model`` (from column or ``set_id`` map)."""
+    if "steel_model" in df.columns:
+        return df["steel_model"].map(normalize_steel_model)
+    sid = pd.to_numeric(df["set_id"], errors="coerce")
+    return sid.map(
+        lambda x: set_id_to_sm.get(int(x), STEEL_MODEL_STEELMPF) if pd.notna(x) else STEEL_MODEL_STEELMPF
+    )
+
+
+def _filter_by_steel_model(df: pd.DataFrame, steel_model: str, set_id_to_sm: dict[int, str]) -> pd.DataFrame:
+    sm = normalize_steel_model(steel_model)
+    sm_s = _steel_model_series_for_df(df, set_id_to_sm)
+    return df.loc[sm_s == sm].copy()
+
+
+def _set_ids_for_steel_model(set_ids: list[int], set_id_to_sm: dict[int, str], steel_model: str) -> list[int]:
+    sm = normalize_steel_model(steel_model)
+    out: list[int] = []
+    for s in set_ids:
+        sid = int(s)
+        if normalize_steel_model(set_id_to_sm.get(sid, STEEL_MODEL_STEELMPF)) == sm:
+            out.append(sid)
+    return out
+
+
+def _models_for_set_ids(set_ids: list[int], set_id_to_sm: dict[int, str]) -> list[str]:
+    models = {normalize_steel_model(set_id_to_sm.get(int(s), STEEL_MODEL_STEELMPF)) for s in set_ids}
+    return ordered_steel_model_subdirs(models)
 
 
 def _parse_set_ids(spec: str) -> list[int]:
@@ -75,10 +141,10 @@ def _set_ids_from_set_id_settings(path: Path) -> list[int]:
     """Load set_id list from set_id_settings.csv (skip comment lines)."""
     if not path.is_file():
         raise SystemExit(f"Missing set_id settings CSV: {path}")
-    df = pd.read_csv(path, comment="#")
+    df = read_set_id_settings_table(path)
     if "set_id" not in df.columns:
         raise SystemExit(f"set_id_settings.csv missing 'set_id' column: {path}")
-    sid = pd.to_numeric(df["set_id"], errors="coerce")
+    sid = pd.to_numeric(df["set_id"].astype(str).str.strip(), errors="coerce")
     sid = sid[np.isfinite(sid)]
     out = sorted({int(x) for x in sid.to_numpy(dtype=float)})
     if not out:
@@ -110,6 +176,14 @@ def _table(headers: list[str], rows: list[list[str]]) -> str:
     return "\n".join(lines)
 
 
+def _generalized_set_ids_present(df: pd.DataFrame) -> list[int]:
+    """Sorted unique ``set_id`` values in a generalized parameters slice (per ``steel_model``)."""
+    if df.empty or "set_id" not in df.columns:
+        return []
+    s = pd.to_numeric(df["set_id"], errors="coerce")
+    return sorted({int(x) for x in s.dropna().to_numpy(dtype=float)})
+
+
 def _generalized_by_set(df: pd.DataFrame, set_ids: list[int], params: list[str]) -> pd.DataFrame:
     """One row per set_id with generalized optimized parameters."""
     if "set_id" not in df.columns:
@@ -118,7 +192,13 @@ def _generalized_by_set(df: pd.DataFrame, set_ids: list[int], params: list[str])
     d = df.assign(_sid=sid)
     d = d[d["_sid"].isin(set_ids)]
     if d.empty:
-        raise SystemExit("generalized CSV: no rows for requested set_id values")
+        have = _generalized_set_ids_present(df)
+        raise SystemExit(
+            "generalized CSV: no rows for requested set_id values "
+            f"(requested {set_ids!r}; this file has set_id values {have!r}). "
+            "Generalized runs use ``set_id`` rows from ``set_id_settings_generalized.csv``, "
+            "which need not match ``set_id`` in ``set_id_settings.csv``."
+        )
     out_rows = []
     for s in set_ids:
         g = d[d["_sid"] == s]
@@ -367,14 +447,25 @@ def build_report(
     set_ids: list[int],
     params: list[str],
     weighted_optima_eps: float,
+    steel_model: str,
+    ind_df: pd.DataFrame,
+    metrics_df: pd.DataFrame,
+    j_df: pd.DataFrame,
+    generalized_metrics_df: pd.DataFrame,
 ) -> tuple[str, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Markdown report string plus summary and per-set DataFrames for CSV export."""
-    ind_df = pd.read_csv(individual_path)
-    metrics_df = pd.read_csv(individual_metrics_path)
-    j_df = pd.read_csv(generalized_path)
-    generalized_metrics_df = pd.read_csv(generalized_metrics_path)
+    sm_tag = normalize_steel_model(steel_model)
 
-    j_by = _generalized_by_set(j_df, set_ids, params)
+    # Generalized outputs are keyed by ``set_id`` rows in ``set_id_settings_generalized.csv``,
+    # not by individual calibration ``set_id`` in ``set_id_settings.csv`` (e.g. steel4 may be 5–6 vs 11–12).
+    g_set_ids = _generalized_set_ids_present(j_df)
+    if not g_set_ids:
+        raise SystemExit(
+            f"generalized parameters CSV ({steel_model} slice): no numeric set_id rows; "
+            "cannot build generalized section."
+        )
+
+    j_by = _generalized_by_set(j_df, g_set_ids, params)
     i_by = _individual_means_by_set(ind_df, set_ids, params)
     i_best, j_at_best = _individual_best_row_per_specimen_by_cost(
         ind_df, metrics_df, set_ids, params
@@ -383,17 +474,21 @@ def build_report(
     metric_csv_cols = [c for c, _ in GENERALIZED_PER_SET_METRICS]
     metric_headers = [h for _, h in GENERALIZED_PER_SET_METRICS]
     agg_m = _generalized_agg_metrics_for_selected_sets(
-        generalized_metrics_df, set_ids, metric_csv_cols
+        generalized_metrics_df, g_set_ids, metric_csv_cols
     )
     best_id, best_j = _best_overall_set_id_from_agg(agg_m)
-    metric_cells = _metric_cells_for_set_ids(agg_m, set_ids, metric_csv_cols)
+    metric_cells = _metric_cells_for_set_ids(agg_m, g_set_ids, metric_csv_cols)
 
     lines: list[str] = [
-        "# Optimized SteelMPF parameters by calibration set",
+        f"# Optimized parameters by calibration set (`steel_model` = `{sm_tag}`)",
         "",
-        "This file summarizes **`PARAMS_IN_SUMMARY_TABLES`** (SteelMPF order: ``b_p``, ``b_n``, then optimized steel, ``a2``, ``a4``) "
-        "from the individual and generalized parameter CSVs. Values are shown for requested **set_id** values: "
-        f"{', '.join(str(int(s)) for s in set_ids)}.",
+        "This file summarizes the tabulated parameter columns for this **steel material** "
+        f"(``{', '.join(params)}``) from the individual and generalized parameter CSVs. "
+        "SteelMPF and Steel4 summaries are **not** merged because the column sets differ. "
+        "**Individual** calibration ``set_id`` values (from ``set_id_settings.csv``): "
+        f"{', '.join(str(int(s)) for s in set_ids)}. "
+        "**Generalized** table uses ``set_id`` values present in the generalized parameters CSV "
+        f"(``set_id_settings_generalized.csv`` rows): {', '.join(str(int(s)) for s in g_set_ids)}.",
         "",
         f"- **Generated:** {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}",
         f"- **Individual parameters CSV:** `{individual_path.as_posix()}`",
@@ -404,8 +499,8 @@ def build_report(
         "## Generalized optimize — shared vector per set",
         "",
         "One row per **set_id**: the generalized optimizer assigns the same shared steel-parameter values to every "
-        "specimen row for that set (default columns: **`PARAMS_TO_OPTIMIZE`**; optional per-`set_id` list in "
-        "**`set_id_settings.csv`**). "
+        "specimen row for that configuration (default columns: **`PARAMS_TO_OPTIMIZE`**; optional per-`set_id` list in "
+        "**`set_id_settings_generalized.csv`**). "
         "**`b_p` / `b_n`** in the merged CSV remain per-specimen when not in that shared vector; the summary "
         "**optimum_value** for those columns is then left blank.",
         "",
@@ -541,6 +636,55 @@ def build_report(
     return "\n".join(lines), j_summary, i_summary, j_by_set, i_by
 
 
+def _metrics_rows_for_individual(metrics_df: pd.DataFrame, ind_df: pd.DataFrame) -> pd.DataFrame:
+    keys = ind_df[["Name", "set_id"]].drop_duplicates()
+    return metrics_df.merge(keys, on=["Name", "set_id"], how="inner").copy()
+
+
+def _generalized_metrics_for_sets(generalized_metrics_df: pd.DataFrame, set_ids: list[int]) -> pd.DataFrame:
+    sid = pd.to_numeric(generalized_metrics_df["set_id"], errors="coerce")
+    allowed = {int(x) for x in set_ids}
+    return generalized_metrics_df.loc[sid.isin(list(allowed))].copy()
+
+
+def _write_report_bundle(
+    *,
+    out_md: Path,
+    text: str,
+    j_summary: pd.DataFrame,
+    i_summary: pd.DataFrame,
+    j_by_set: pd.DataFrame,
+    i_by_set: pd.DataFrame,
+    weighted_optima_eps: float,
+) -> None:
+    out_md.parent.mkdir(parents=True, exist_ok=True)
+    generalized_csv = out_md.with_name(f"{out_md.stem}_generalized.csv")
+    indiv_csv = out_md.with_name(f"{out_md.stem}_individual.csv")
+    generalized_by_set_csv = out_md.with_name(f"{out_md.stem}_generalized_by_set.csv")
+    individual_by_set_csv = out_md.with_name(f"{out_md.stem}_individual_by_set.csv")
+    md_footer = (
+        "\n## Machine-readable summaries\n\n"
+        f"**Rollup** (one row per parameter, mean/min/max across sets): `{generalized_csv.name}`, "
+        f"`{indiv_csv.name}`. Generalized adds **`optimum_value`** (shared optimized parameters at the "
+        f"specimen-set best `set_id`; `b_p` / `b_n` blank); individual adds **`mean_optima`** and "
+        f"**`mean_optima_weighted`** (inverse-loss–weighted mean using `1/(final_J_feat_raw+eps)` at each "
+        f"specimen's best set; default eps = {float(weighted_optima_eps):g}).\n\n"
+        f"**By `set_id`** (wide tables, same numeric content as the Markdown set tables): "
+        f"`{generalized_by_set_csv.name}` (parameters + specimen-weighted eval columns), "
+        f"`{individual_by_set_csv.name}` (mean parameters per set).\n"
+    )
+    out_md.write_text(text.rstrip() + md_footer, encoding="utf-8")
+    print(f"Wrote {out_md}")
+    j_summary.to_csv(generalized_csv, index=False)
+    i_summary.to_csv(indiv_csv, index=False)
+    j_by_set.to_csv(generalized_by_set_csv, index=False)
+    i_by_set.to_csv(individual_by_set_csv, index=False)
+    print(f"Wrote {generalized_csv}")
+    print(f"Wrote {indiv_csv}")
+    print(f"Wrote {generalized_by_set_csv}")
+    print(f"Wrote {individual_by_set_csv}")
+
+
 def main() -> None:
     """CLI entry point."""
     p = argparse.ArgumentParser(description=__doc__)
@@ -615,6 +759,8 @@ def main() -> None:
             "Write Markdown report to this path (UTF-8). Also writes in the same directory: "
             "{stem}_generalized.csv, {stem}_individual.csv (rollup by parameter); "
             "{stem}_generalized_by_set.csv, {stem}_individual_by_set.csv (one row per set_id). "
+            "If multiple steel_model values appear among the selected set_ids and both have data, "
+            "writes {base}_{steel_model}.md plus matching CSV stems and a short {base}.md index. "
             f"Typical: {_w_rel}. "
             "Default: print Markdown to stdout only (no CSV)."
         ),
@@ -646,47 +792,103 @@ def main() -> None:
         set_ids = _parse_set_ids(args.sets)
     else:
         set_ids = _set_ids_from_set_id_settings(Path(args.set_id_settings).expanduser().resolve())
-    params = list(PARAMS_IN_SUMMARY_TABLES)
-    text, j_summary, i_summary, j_by_set, i_by_set = build_report(
-        individual_path=ind,
-        individual_metrics_path=ind_metrics,
-        generalized_path=j,
-        generalized_metrics_path=j_metrics,
-        set_ids=set_ids,
-        params=params,
-        weighted_optima_eps=float(args.weighted_optima_eps),
-    )
+    settings_p = Path(args.set_id_settings).expanduser().resolve()
+    set_id_to_sm = _load_set_id_to_steel_model(settings_p)
+
+    ind_df_full = pd.read_csv(ind)
+    metrics_df_full = pd.read_csv(ind_metrics)
+    j_df_full = pd.read_csv(j)
+    generalized_metrics_df_full = pd.read_csv(j_metrics)
+
+    candidate_models = _models_for_set_ids(set_ids, set_id_to_sm)
+    models_with_data: list[str] = []
+    for sm in candidate_models:
+        ids_m = _set_ids_for_steel_model(set_ids, set_id_to_sm, sm)
+        if not ids_m:
+            continue
+        ind_f = _filter_by_steel_model(ind_df_full, sm, set_id_to_sm)
+        j_f = _filter_by_steel_model(j_df_full, sm, set_id_to_sm)
+        if ind_f.empty or j_f.empty:
+            continue
+        models_with_data.append(sm)
+
+    if not models_with_data:
+        raise SystemExit(
+            "No calibration rows after steel_model / set_id filtering "
+            "(check set_id_settings.csv vs individual/generalized parameter CSVs)."
+        )
+
+    multi = len(models_with_data) > 1
+    eps = float(args.weighted_optima_eps)
+
+    def _bundle_for_model(sm: str) -> tuple[str, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+        ids_m = _set_ids_for_steel_model(set_ids, set_id_to_sm, sm)
+        params = params_in_summary_tables_for_steel_model(sm)
+        ind_f = _filter_by_steel_model(ind_df_full, sm, set_id_to_sm)
+        j_f = _filter_by_steel_model(j_df_full, sm, set_id_to_sm)
+        met_f = _metrics_rows_for_individual(metrics_df_full, ind_f)
+        g_ids = _generalized_set_ids_present(j_f)
+        gmf = _generalized_metrics_for_sets(
+            generalized_metrics_df_full, g_ids if g_ids else ids_m
+        )
+        return build_report(
+            individual_path=ind,
+            individual_metrics_path=ind_metrics,
+            generalized_path=j,
+            generalized_metrics_path=j_metrics,
+            set_ids=ids_m,
+            params=params,
+            weighted_optima_eps=eps,
+            steel_model=sm,
+            ind_df=ind_f,
+            metrics_df=met_f,
+            j_df=j_f,
+            generalized_metrics_df=gmf,
+        )
 
     if args.write:
         out = Path(args.write).expanduser().resolve()
         out.parent.mkdir(parents=True, exist_ok=True)
-        generalized_csv = out.with_name(f"{out.stem}_generalized.csv")
-        indiv_csv = out.with_name(f"{out.stem}_individual.csv")
-        generalized_by_set_csv = out.with_name(f"{out.stem}_generalized_by_set.csv")
-        individual_by_set_csv = out.with_name(f"{out.stem}_individual_by_set.csv")
-        md_footer = (
-            "\n## Machine-readable summaries\n\n"
-            f"**Rollup** (one row per parameter, mean/min/max across sets): `{generalized_csv.name}`, "
-            f"`{indiv_csv.name}`. Generalized adds **`optimum_value`** (shared optimized parameters at the "
-            f"specimen-set best `set_id`; `b_p` / `b_n` blank); individual adds **`mean_optima`** and "
-            f"**`mean_optima_weighted`** (inverse-loss–weighted mean using `1/(final_J_feat_raw+eps)` at each "
-            f"specimen's best set; default eps = {float(args.weighted_optima_eps):g}).\n\n"
-            f"**By `set_id`** (wide tables, same numeric content as the Markdown set tables): "
-            f"`{generalized_by_set_csv.name}` (parameters + specimen-weighted eval columns), "
-            f"`{individual_by_set_csv.name}` (mean parameters per set).\n"
-        )
-        out.write_text(text.rstrip() + md_footer, encoding="utf-8")
-        print(f"Wrote {out}")
-        j_summary.to_csv(generalized_csv, index=False)
-        i_summary.to_csv(indiv_csv, index=False)
-        j_by_set.to_csv(generalized_by_set_csv, index=False)
-        i_by_set.to_csv(individual_by_set_csv, index=False)
-        print(f"Wrote {generalized_csv}")
-        print(f"Wrote {indiv_csv}")
-        print(f"Wrote {generalized_by_set_csv}")
-        print(f"Wrote {individual_by_set_csv}")
+        if multi:
+            index_links: list[str] = []
+            for sm in models_with_data:
+                out_m = out.with_name(f"{out.stem}_{sm}{out.suffix}")
+                text, j_summary, i_summary, j_by_set, i_by_set = _bundle_for_model(sm)
+                _write_report_bundle(
+                    out_md=out_m,
+                    text=text,
+                    j_summary=j_summary,
+                    i_summary=i_summary,
+                    j_by_set=j_by_set,
+                    i_by_set=i_by_set,
+                    weighted_optima_eps=eps,
+                )
+                index_links.append(f"- **[{sm}]({out_m.name})** — `{out_m.stem}_*.csv`")
+            index_body = (
+                "# Calibration parameter summaries\n\n"
+                "**SteelMPF** and **Steel4** use different tabulated columns; aggregate statistics are split "
+                "by `steel_model` so values stay comparable within each material model.\n\n"
+                + "\n".join(index_links)
+                + "\n"
+            )
+            out.write_text(index_body, encoding="utf-8")
+            print(f"Wrote index {out}")
+        else:
+            sm0 = models_with_data[0]
+            text, j_summary, i_summary, j_by_set, i_by_set = _bundle_for_model(sm0)
+            _write_report_bundle(
+                out_md=out,
+                text=text,
+                j_summary=j_summary,
+                i_summary=i_summary,
+                j_by_set=j_by_set,
+                i_by_set=i_by_set,
+                weighted_optima_eps=eps,
+            )
     else:
-        print(text)
+        for sm in models_with_data:
+            text, _, _, _, _ = _bundle_for_model(sm)
+            print(f"--- steel_model={sm} ---\n{text}")
 
 
 if __name__ == "__main__":

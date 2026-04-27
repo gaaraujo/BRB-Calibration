@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Zip everything clean_outputs.sh would wipe, plus full results/plots and results/calibration.
+# Zip everything clean_outputs.sh would wipe: data/* pipeline subtrees, full results/plots,
+# results/calibration, and summary_statistics/ (entire tree).
 # Run from repo root: ./archive_pipeline_outputs.sh [--label myrun] [--out-dir run_snapshots]
 # Output: run_snapshots/<yyyyMMdd_HHmmss>_<label>.zip - unzip at repo root to restore paths.
 
@@ -33,16 +34,6 @@ cleanup() { rm -rf "$STAGING"; }
 trap cleanup EXIT
 
 DATA_DIRS=(data/filtered data/resampled data/cycle_points_original data/cycle_points_resampled)
-ROOT_FILES=(
-  summary_statistics/calibration_parameter_summary.md
-  summary_statistics/calibration_parameter_summary_generalized.csv
-  summary_statistics/calibration_parameter_summary_individual.csv
-  summary_statistics/calibration_parameter_summary_generalized_by_set.csv
-  summary_statistics/calibration_parameter_summary_individual_by_set.csv
-  summary_statistics/generalized_set_id_eval_summary.csv
-  summary_statistics/generalized_unordered_J_binenv_summary_train.csv
-  summary_statistics/generalized_unordered_J_binenv_summary_validation.csv
-)
 INCLUDED=()
 
 copy_if_exists() {
@@ -62,15 +53,8 @@ copy_if_exists() {
 for rel in "${DATA_DIRS[@]}"; do
   copy_if_exists "$rel"
 done
-for rel in results/plots results/calibration; do
+for rel in results/plots results/calibration summary_statistics; do
   copy_if_exists "$rel"
-done
-for f in "${ROOT_FILES[@]}"; do
-  if [[ -f "$ROOT/$f" ]]; then
-    mkdir -p "$(dirname "$STAGING/$f")"
-    cp -a "$ROOT/$f" "$STAGING/$f"
-    INCLUDED+=("$f")
-  fi
 done
 
 if [[ ${#INCLUDED[@]} -eq 0 ]]; then

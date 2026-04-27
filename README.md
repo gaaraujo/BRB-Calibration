@@ -4,7 +4,7 @@ A Python pipeline for calibrating **OpenSees SteelMPF** parameters for buckling-
 
 Each specimen is modeled with a **single corotational truss**, driven by a **fixed, resampled displacement history**; a subset of steel parameters is optimized so the simulated axial force matches the test.
 
-After **per-specimen** L-BFGS-B fits (gated by **`individual_optimize`** in `BRB-Specimens.csv`), the pipeline forms a **weighted-mean** SteelMPF vector using **`averaged_weight`**, and can run **generalized** optimization of a shared parameter vector per `set_id` (or globally) using **`generalized_weight`** on path-ordered specimens.
+After **per-specimen** L-BFGS-B fits (gated by **`individual_optimize`** in `BRB-Specimens.csv`), the pipeline can run **generalized** optimization of a shared SteelMPF vector: one L-BFGS problem per `set_id` row in `set_id_settings_generalized.csv`, each over all path-ordered specimens with positive **`generalized_weight`** (or a single pooled run with `--no-by-set-id`).
 
 **Navigating the code:** folder roles, a data-flow diagram, and a "where to edit" table are in [`scripts/README.md`](scripts/README.md). Specimen inclusion and paths are centralized in [`scripts/postprocess/specimen_catalog.py`](scripts/postprocess/specimen_catalog.py).
 
@@ -22,13 +22,13 @@ After **per-specimen** L-BFGS-B fits (gated by **`individual_optimize`** in `BRB
   - [Identification Objective](#identification-objective)
   - [Parameter Seeding and Initialization](#parameter-seeding-and-initialization)
   - [Individual Specimen Optimization](#individual-specimen-optimization)
-  - [Averaged and Generalized Optimization](#averaged-and-generalized-optimization)
+  - [Generalized calibration stage](#generalized-calibration-stage)
   - [Specimen Weights](#specimen-weights)
   - [Parameter Summary Reports](#parameter-summary-reports)
 - [Running the Pipeline](#running-the-pipeline)
   - [Full Run](#full-run)
   - [Averaged Evaluation](#averaged-evaluation)
-  - [Generalized Optimization](#generalized-optimization)
+  - [Run generalized optimization](#run-generalized-optimization)
   - [Other One-Off Commands](#other-one-off-commands)
   - [Step-by-Step Reference](#step-by-step-reference)
 - [Key Outputs](#key-outputs)
@@ -166,7 +166,7 @@ BRB-Calibration/
 
 | File | Role |
 |------|------|
-| `config/calibration/BRB-Specimens.csv` | Geometry, layout flags, `individual_optimize`, `averaged_weight`, `generalized_weight`, … |
+| `config/calibration/BRB-Specimens.csv` | Geometry, layout flags, `individual_optimize`, `generalized_weight`, … |
 | `config/calibration/params_limits.csv` | Optional finite bounds per parameter (`parameter`, `lower`, `upper`); omitted parameters are unbounded |
 | `config/calibration/set_id_settings.csv` | One row per `set_id`: steel seeds (`E,R0,cR1,cR2,a1–a4,b_p,b_n`), `optimize_params`, and objective/amplitude settings (`w_*`, `use_amplitude_weights`, `amplitude_weight_*`). Leave blank to use defaults. |
 
@@ -185,7 +185,6 @@ The catalog **`BRB-Specimens.csv`** supplies geometry (`L_T_in`, `L_y_in`, `A_c_
 | `path_ordered` | `true` / `false` | With **`digitized`**: `true` = path-ordered `force_deformation.csv`; `false` = unordered F–u samples plus `deformation_history.csv` |
 | `skip_filter_resample` | `true` / `false` | If `true`, filtered path omits Savitzky–Golay; **resampling still runs** |
 | `individual_optimize` | `true` / `false` | Eligibility for `optimize_brb_mse` when resampled `force_deformation.csv` exists |
-| `averaged_weight` | ≥ 0 | Weight in averaged-parameter mean (path-ordered only; unordered rows excluded) |
 | `generalized_weight` | ≥ 0 | Weight in generalized objective (path-ordered only; unordered rows excluded) |
 
 **Two kinds of experimental data.** Most specimens have a **path-ordered** force–deformation record: points follow a single continuous hysteresis trajectory (lab instrumentation or digitization that preserves order), so cycle landmarks, filtering, and resampling apply in the usual way. A subset comes from **digitized literature** plots where **force and deformation were sampled as unordered $(F,u)$ points**—the pairs are **not** in loading-path order. For those, the model still has a meaningful **deformation history** (prescribed axial motion applied during the test), supplied as `deformation_history.csv`. The pipeline drives the simulation with that history (after any resampling), so you get a **continuous simulated force** to compare **visually** against the **scattered** experimental points (overlay plots), even though there is no single ordered $F$–$u$ path to match point-for-point like a path-ordered hysteresis. This distinction is important because only **path-ordered** data supports cycle-based feature extraction.
@@ -316,28 +315,26 @@ Each row of **`set_id_settings.csv`** defines one **`set_id`**. Running the full
 
 [`optimize_brb_mse.py`](scripts/calibrate/optimize_brb_mse.py) minimizes $J$ over **`PARAMS_TO_OPTIMIZE`**. Outputs: `optimized_brb_parameters.csv`, metrics CSV, NPZ + `*_simulated.csv`, and plots under `results/plots/calibration/individual_optimize/`.
 
-### Averaged and Generalized Optimization
+### Generalized calibration stage
 
-**Averaged:** [`eval_averaged_params.py`](scripts/calibrate/eval_averaged_params.py) computes the weighted mean of optimized parameters per `set_id` using **`averaged_weight`** (path-ordered rows only), then re-simulates every row for metrics and overlays.
-
-**Generalized:** [`optimize_generalized_brb_mse.py`](scripts/calibrate/optimize_generalized_brb_mse.py) minimizes the weighted average of $J$ across specimens with **`generalized_weight`**, typically initializing from averaged means; shared vector per `set_id` by default.
+**Generalized:** [`optimize_generalized_brb_mse.py`](scripts/calibrate/optimize_generalized_brb_mse.py) minimizes the weighted average of $J$ across specimens with **`generalized_weight`**, with seeds and loss weights from each numeric `set_id` row in `set_id_settings_generalized.csv` (every such row runs one optimization over the same training pool unless `--no-by-set-id` pools them).
 
 **Unordered digitized:** training vs. evaluation behavior follows the catalog and script docstrings; see [`digitized_unordered_eval_lib.py`](scripts/calibrate/digitized_unordered_eval_lib.py).
 
 ### Specimen Weights
 
-**`averaged_weight`** / **`generalized_weight`** control contribution to the averaged-parameter mean and generalized objective for **path-ordered** specimens only. **`individual_optimize`** selects who runs `optimize_brb_mse`. Metrics CSVs include an `individual_optimize` column.
+**`generalized_weight`** controls contribution to the generalized objective for **path-ordered** specimens only. **`individual_optimize`** selects who runs `optimize_brb_mse`. Metrics CSVs include an `individual_optimize` column.
 
-**CB225** / **PC3SB:** set `individual_optimize=true` with `averaged_weight=0` and `generalized_weight=0` to fit them per specimen but exclude them from averaged/generalized aggregates.
+**CB225** / **PC3SB:** set `individual_optimize=true` with `generalized_weight=0` to fit them per specimen but exclude them from the generalized aggregate.
 
 **CB225** also sets `skip_filter_resample=true` so the filtered output matches the trim-valid raw series without Savitzky–Golay smoothing; it still receives resampled CSVs and downstream calibration like other path-ordered specimens.
 
 ### Parameter Summary Reports
 
-[`report_calibration_param_tables.py`](scripts/calibrate/report_calibration_param_tables.py) writes Markdown + CSV summaries under **`summary_statistics/`** (e.g. `--write summary_statistics/calibration_parameter_summary.md`). The Markdown **generalized** section states the **best `set_id`** (lowest specimen-weighted mean `final_J_total` over contributing rows) and extends the per-`set_id` table with weighted-mean eval columns from `generalized_params_eval_metrics.csv` (`J_feat`, `J_feat_L1`, `J_E`, `J_E_L1`, `J_total`, `J_binenv`, `J_binenv_L1`). The companion files are:
+[`report_calibration_param_tables.py`](scripts/calibrate/report_calibration_param_tables.py) writes Markdown + CSV summaries under **`summary_statistics/`** (e.g. `--write summary_statistics/calibration_parameter_summary.md`). When **both** `steelmpf` and `steel4` appear among the selected `set_id` rows in `set_id_settings.csv` and each has individual + generalized rows, it writes **`calibration_parameter_summary_<steel_model>.md`** plus matching **`_<steel_model>_generalized.csv`** / **`_<steel_model>_individual.csv`** (and by-`set_id` siblings), and a short **`calibration_parameter_summary.md`** index linking them—Steel4 adds `STEEL4_ISO_KEYS` columns so rollups stay within-model. With a single material model, filenames stay unsuffixed as before. The Markdown **generalized** section states the **best `set_id`** (lowest specimen-weighted mean `final_J_total` over contributing rows) and extends the per-`set_id` table with weighted-mean eval columns from `generalized_params_eval_metrics.csv` (`J_feat`, `J_feat_L1`, `J_E`, `J_E_L1`, `J_total`, `J_binenv`, `J_binenv_L1`). The companion files are:
 
-- **`summary_statistics/calibration_parameter_summary_generalized.csv`** — includes `optimum_value` for shared optimized parameters (values at the best `set_id` for the specimen set from `generalized_params_eval_metrics.csv`); **`b_p` / `b_n`** are left blank there because they are not a single merged value per `set_id` with the default `PARAMS_TO_OPTIMIZE`. Rows list the same parameters in **SteelMPF order** (`b_p`, `b_n`, then `PARAMS_TO_OPTIMIZE`, `a2`, `a4`; see `scripts/calibrate/params_to_optimize.py`: `PARAMS_IN_SUMMARY_TABLES`).
-- **`summary_statistics/calibration_parameter_summary_individual.csv`** — adds `mean_optima` and `mean_optima_weighted` (inverse-loss–weighted mean using `1/(final_J_total+eps)` at each specimen's best set; `--weighted-optima-eps`). Same parameter columns as the generalized summary CSV.
+- **`summary_statistics/calibration_parameter_summary_generalized.csv`** (or **`..._<steel_model>_generalized.csv`**) — includes `optimum_value` for shared optimized parameters (values at the best `set_id` for the specimen set from `generalized_params_eval_metrics.csv`); **`b_p` / `b_n`** are left blank there when they are not a single merged value per `set_id` with the default `PARAMS_TO_OPTIMIZE`. Parameter columns follow **`params_in_summary_tables_for_steel_model`** in `scripts/calibrate/params_to_optimize.py` (SteelMPF vs Steel4 column sets).
+- **`summary_statistics/calibration_parameter_summary_individual.csv`** (or **`..._<steel_model>_individual.csv`**) — adds `mean_optima` and `mean_optima_weighted` (inverse-loss–weighted mean using `1/(final_J_feat_raw+eps)` at each specimen's best set; `--weighted-optima-eps`). Same parameter columns as the matching generalized summary CSV for that `steel_model`.
 - **`summary_statistics/generalized_set_id_eval_summary.csv`** — written by [`optimize_generalized_brb_mse.py`](scripts/calibrate/optimize_generalized_brb_mse.py) (or [`report_generalized_set_id_eval_summary.py`](scripts/calibrate/report_generalized_set_id_eval_summary.py)): per-`set_id` weighted means for `J_total` / `J_feat` / `J_E`, plus largest/smallest specimen and **means with that specimen removed** (with/without outlier-style rollups).
 - **`summary_statistics/generalized_unordered_J_binenv_summary_train.csv`** / **`..._validation.csv`** — rollups for **`J_binenv`** and **`J_binenv_L1`** from `final_unordered_J_binenv` / `final_unordered_J_binenv_l1`. **Train** = specimens that contribute with positive weight to generalized optimization; **validation** = all other rows in the generalized metrics file for that `set_id` (uniform weights).
 
@@ -356,7 +353,7 @@ From the repository root:
 .\run.ps1         # Windows PowerShell
 ```
 
-`run.sh` / `run.ps1` execute in order: postprocess → `extract_bn_bp.py` → `build_initial_brb_parameters.py` → apparent-$b$ figures → `plot_preset_overlays.py --params results/calibration/individual_optimize/initial_brb_parameters.csv` (preset **`b_p=0.007`**, **`b_n=0.020`**; combined `set*_combined_force_def_norm.png` under `overlays_initial_params/`, plus `initial_params_simulated_force/`) → `optimize_brb_mse.py` → `plot_params_vs_filtered.py` (per-specimen optimized overlays) → averaged eval → generalized optimization + eval → `plot_compare_calibration_overlays.py` → `report_calibration_param_tables.py` → optional debug plots.
+`run.sh` / `run.ps1` execute in order: postprocess → `extract_bn_bp.py` → `build_initial_brb_parameters.py` → apparent-$b$ figures → `plot_preset_overlays.py` (reads **`initial_brb_parameters.csv`**; **two** montage sets by default: `overlays_initial_params/` + `initial_params_simulated_force/` for the `individual_optimize` training cohort, and `overlays_initial_params_all_specimens/` + `initial_params_simulated_force_all_specimens/` for all path-ordered + digitized-unordered rows) → `optimize_brb_mse.py` → `plot_params_vs_filtered.py` (per-specimen optimized overlays) → averaged eval → generalized optimization + eval → `plot_compare_calibration_overlays.py` → `report_calibration_param_tables.py` → optional debug plots.
 
 **Logging.** Mirror console output to a file (each run overwrites). Both scripts print a **finished** banner at the end with wall-clock **end time** and **elapsed** duration (same block is appended to `pipeline_log.txt` when `PIPELINE_LOG` is set, including after a failed step).
 
@@ -379,11 +376,10 @@ python scripts/calibrate/eval_averaged_params.py \
 
 Options: `--no-by-set-id`, `--specimen <Name>`. Edit weights in `scripts/calibrate/specimen_weights.py` only.
 
-### Generalized Optimization
+### Run generalized optimization
 
 ```bash
 python scripts/calibrate/optimize_generalized_brb_mse.py \
-  --params results/calibration/individual_optimize/optimized_brb_parameters.csv \
   --output-params results/calibration/generalized_optimize/generalized_brb_parameters.csv \
   --output-metrics results/calibration/generalized_optimize/generalized_params_eval_metrics.csv \
   --output-plots-dir results/plots/calibration/generalized_optimize/overlays
@@ -398,8 +394,8 @@ Options: `--no-by-set-id`, `--specimen <Name>`.
 python scripts/calibrate/optimize_brb_mse.py \
   --specimen <Name> --initial-params <path> --output <path>
 
-# Preset combined overlays only (fixed b_p/b_n; steel from seeds — same as pipeline step 9)
-python scripts/calibrate/plot_preset_overlays.py --params results/calibration/individual_optimize/initial_brb_parameters.csv
+# Preset combined overlays from initial_brb_parameters.csv (pipeline step 9)
+python scripts/calibrate/plot_preset_overlays.py
 
 # Overlay plots (optimized or any parameters CSV)
 python scripts/calibrate/plot_params_vs_filtered.py \
@@ -431,7 +427,7 @@ Run from the repo root in order if you prefer not to use `run.sh` / `run.ps1`:
 | 5 | `python scripts/calibrate/extract_bn_bp.py` | `specimen_apparent_bn_bp.csv` |
 | 6 | `python scripts/calibrate/build_initial_brb_parameters.py` | `initial_brb_parameters.csv` |
 | 7–8 | `plot_b_slopes.py`, `plot_b_histograms_and_scatter.py` | `results/plots/apparent_b/` |
-| 9 | `plot_preset_overlays.py --params results/calibration/individual_optimize/initial_brb_parameters.csv` (or `--set-id-settings config/calibration/set_id_settings.csv`; combined montages only) | `overlays_initial_params/set*_combined_force_def_norm.png`, `initial_params_simulated_force/`, `initial_params_overlay_parameters.csv` |
+| 9 | `plot_preset_overlays.py` (default params: `initial_brb_parameters.csv`; `--scope` `train`, `all`, or `both`) | `overlays_initial_params/`, `initial_params_simulated_force/` (train); `overlays_initial_params_all_specimens/`, `initial_params_simulated_force_all_specimens/` (all specimens) |
 | 10 | `python scripts/calibrate/optimize_brb_mse.py` | `calibration/individual_optimize/*`, cycle-weight plots |
 | 11 | `python scripts/calibrate/plot_params_vs_filtered.py` (optimized params) | `plots/calibration/individual_optimize/overlays/` |
 | 12 | `python scripts/calibrate/eval_averaged_params.py` (see above) | `calibration/averaged_optimize/*` |
@@ -458,19 +454,21 @@ Run from the repo root in order if you prefer not to use `run.sh` / `run.ps1`:
 | `calibration/individual_optimize/…/*_simulated.csv` | `Deformation[in], Force[kip], Force_sim[kip]` for optimized rows |
 | `calibration/averaged_optimize/averaged_brb_parameters.csv` | Merged averaged `PARAMS_TO_OPTIMIZE` for full specimen set |
 | `calibration/averaged_optimize/averaged_params_eval_metrics.csv` | Averaged evaluation metrics |
-| `calibration/generalized_optimize/generalized_brb_parameters.csv` | Merged generalized `PARAMS_TO_OPTIMIZE` for full specimen set |
+| `calibration/generalized_optimize/generalized_brb_parameters.csv` | Merged generalized `PARAMS_TO_OPTIMIZE` for full specimen set; one row per (specimen, generalized `set_id`) |
 | `calibration/generalized_optimize/generalized_params_eval_metrics.csv` | Generalized evaluation metrics |
-| `summary_statistics/calibration_parameter_summary.md` | `PARAMS_IN_SUMMARY_TABLES` (SteelMPF order: `b_p`, `b_n`, then `PARAMS_TO_OPTIMIZE`, `a2`, `a4`) by `set_id`: generalized shared vector vs individual specimen-set mean; mean/min/max across sets |
-| `summary_statistics/calibration_parameter_summary_generalized.csv` | Generalized summary with `optimum_value` at best `set_id` (blank for `b_p` / `b_n`) |
-| `summary_statistics/calibration_parameter_summary_individual.csv` | Individual summary with `mean_optima` and `mean_optima_weighted` |
+| `summary_statistics/calibration_parameter_summary.md` | Index when both `steelmpf` and `steel4` have outputs; otherwise the full report for the single model |
+| `summary_statistics/calibration_parameter_summary_<steel_model>.md` | Per-material report (and `_*_generalized.csv` / `_*_individual.csv` / by-`set_id` CSVs) when multiple models have data |
+| `summary_statistics/calibration_parameter_summary_generalized.csv` | Single-model generalized summary with `optimum_value` at best `set_id` (blank for `b_p` / `b_n` when not shared) |
+| `summary_statistics/calibration_parameter_summary_individual.csv` | Single-model individual summary with `mean_optima` and `mean_optima_weighted` |
 | `summary_statistics/generalized_set_id_eval_summary.csv` | Per-`set_id` eval rollups (full pool vs without largest/smallest specimen) |
 | `summary_statistics/generalized_unordered_J_binenv_summary_train.csv` | Per-`set_id` `J_binenv` / `J_binenv_L1` rollups for **generalized training** contributors only |
 | `summary_statistics/generalized_unordered_J_binenv_summary_validation.csv` | Same metrics for **non-contributing** specimens (per `set_id`) |
 | `plots/postprocess/` | Batch specimen and QA plots |
 | `plots/calibration/individual_optimize/cycle_weights/` | Amplitude / cycle-weight diagnostics |
-| `calibration/individual_optimize/initial_params_overlay_parameters.csv` | Snapshot used for preset combined overlays (same rows as initial seeds, fixed **`b_p`/`b_n`**) |
-| `calibration/individual_optimize/initial_params_simulated_force/` | ``{Name}_set{k}_simulated.csv`` for preset runs (input to combined montages) |
-| `plots/calibration/individual_optimize/overlays_initial_params/` | Preset **`set*k*_combined_force_def_norm.png`** (before L-BFGS); no per-specimen PNGs |
+| `calibration/individual_optimize/initial_params_simulated_force/` | Preset sim CSVs for **`individual_optimize`** training cohort |
+| `calibration/individual_optimize/initial_params_simulated_force_all_specimens/` | Preset sim CSVs for **all** path-ordered + digitized-unordered rows in `initial_brb_parameters.csv` |
+| `plots/calibration/individual_optimize/overlays_initial_params/` | Preset combined PNGs (training cohort) |
+| `plots/calibration/individual_optimize/overlays_initial_params_all_specimens/` | Preset combined PNGs (all specimens batch) |
 | `plots/calibration/{individual,averaged,generalized}_optimize/overlays/` | Sim vs experiment overlays; `set*_combined_force_def_norm.png` |
 | `plots/apparent_b/` | Apparent-$b$ slope, histogram, and geometry figures |
 
@@ -487,7 +485,7 @@ Regenerated outputs can be removed while preserving **`data/raw/`** and everythi
 .\clean_outputs.ps1     # Windows
 ```
 
-This deletes `data/filtered`, `resampled`, `cycle_points_original`, `cycle_points_resampled`, all of **`results/plots/`** and **`results/calibration/`**, and the generated files under **`summary_statistics/`** (parameter summaries + `generalized_set_id_eval_summary.csv`). It does **not** remove **`docs/readme/`** snapshots.
+This deletes `data/filtered`, `resampled`, `cycle_points_original`, `cycle_points_resampled`, all of **`results/plots/`** and **`results/calibration/`**, and **all contents** of **`summary_statistics/`** (parameter summaries, eval reports, and any other files the pipeline writes there). It does **not** remove **`docs/readme/`** snapshots.
 
 **Archive before a clean or alternate run:** zip everything the clean script would wipe (processed `data/*` subtrees, full `results/plots/` and `results/calibration/`, and `summary_statistics/*`) into a single timestamped file under `run_snapshots/`:
 
@@ -519,7 +517,7 @@ Unzip at the repo root to restore paths. `MANIFEST.txt` inside the archive lists
 | `scripts/calibrate/specimen_weights.py` | Default specimen weights for averaged / generalized aggregates |
 | `scripts/calibrate/plot_compare_calibration_overlays.py` | Per-`set_id` combined montage (`set{k}_combined_force_def_norm.png`) |
 | `scripts/calibrate/report_calibration_param_tables.py` | `PARAMS_TO_OPTIMIZE` by `set_id` (Markdown + CSV) |
-| `scripts/calibrate/report_averaged_vs_generalized_metrics.py` | Narrative comparison of averaged vs generalized and best `set_id` |
+| `scripts/calibrate/report_averaged_vs_generalized_metrics.py` | Narrative report: individual vs generalized stages and best `set_id` |
 | `archive_pipeline_outputs.sh` / `archive_pipeline_outputs.ps1` | Zip processed `data/*`, `results/plots`, `results/calibration`, and repo-root calibration summaries into `run_snapshots/` |
 | `scripts/calibrate/calibration_paths.py` | Default paths under `results/`; `SET_ID_SETTINGS_CSV`, `PARAM_LIMITS_CSV` |
 | `scripts/calibrate/param_limits.py` | Load `params_limits.csv` for `bounds_dict_for(...)` |

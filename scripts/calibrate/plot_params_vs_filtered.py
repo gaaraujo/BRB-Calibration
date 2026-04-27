@@ -7,7 +7,7 @@ For each specimen with:
 - geometry name in BRB-Specimens.csv (for discovery); model inputs from parameters CSV
 - parameter row in the given parameters CSV (e.g. initial_brb_parameters.csv or
   optimized_brb_parameters.csv): columns follow ``run_simulation`` / SteelMPF order after
-  ID/Name/set_id -- L_T, L_y, A_sc, A_t, fyp, fyn, E, b_p, b_n, R0, cR1, cR2, a1-a4
+  ID/Name/set_id -- L_T, L_y, A_sc, A_t, fyp, fyn, E, b_p, b_n, R0, cR1, cR2, a1-a4 (required)
 
 this script runs the corotruss model with SteelMPF and plots both:
 - **Physical** overlays ($P$ [kip] vs deformation [in]) — per-specimen companion only; exception to the repo-wide normalized hysteresis default.
@@ -48,19 +48,28 @@ from calibrate.calibration_paths import (  # noqa: E402
     OPTIMIZED_BRB_PARAMETERS_PATH,
     PLOTS_INDIVIDUAL_OPTIMIZE,
 )
+from calibrate.optimize_brb_mse import run_simulation_kwargs_from_prow  # noqa: E402
+from calibrate.params_to_optimize import SIM_PARAMS_FROM_ROW  # noqa: E402
 from calibrate.digitized_unordered_eval_lib import (  # noqa: E402
     DEFAULT_BINENV_N_BINS,
+    eval_row_with_envelope_bn_from_unordered,
+    load_digitized_unordered_series,
     num_to_exp_nearest_indices,
 )
 from model.corotruss import run_simulation  # noqa: E402
 from postprocess.plot_dimensions import (  # noqa: E402
+    AXES_SPINE_LINEWIDTH_SINGLE_AX,
     COLOR_EXPERIMENTAL,
     COLOR_NUMERICAL_COHORT,
-    LEGEND_FONT_SIZE_SMALL_PT,
+    HYSTERESIS_LINEWIDTH_SCALE_OVERLAYS,
+    LEGEND_FONT_SIZE_SINGLE_AX_PT,
+    LINEWIDTH_HYSTERESIS_OVERLAY_EXPERIMENTAL,
+    LINEWIDTH_HYSTERESIS_OVERLAY_SIMULATED,
     SAVE_DPI,
     SINGLE_FIGSIZE_IN,
     configure_matplotlib_style,
-    style_axes_spines_and_ticks,
+    single_axis_style_context,
+    style_single_axis_spines,
 )
 from postprocess.plot_specimens import (  # noqa: E402
     NORM_FORCE_LABEL,
@@ -71,6 +80,7 @@ from postprocess.plot_specimens import (  # noqa: E402
 )
 from specimen_catalog import (  # noqa: E402
     get_specimen_record,
+    list_names_digitized_unordered,
     path_ordered_resampled_force_csv_stems,
     read_catalog,
     resolve_resampled_force_deformation_csv,
@@ -81,12 +91,50 @@ CATALOG_PATH = BRB_SPECIMENS_CSV
 DEFAULT_PARAMS_PATH = OPTIMIZED_BRB_PARAMETERS_PATH
 PLOTS_BASE = PLOTS_INDIVIDUAL_OPTIMIZE
 
+
+def _row_float_or_default(prow: pd.Series, key: str, default: float) -> float:
+    if key not in prow.index or pd.isna(prow.get(key)):
+        return default
+    return float(prow[key])
+
+
+def _path_ordered_sim_kwargs(
+    prow: pd.Series,
+    catalog_row: pd.Series,
+    *,
+    specimen_id: str,
+    set_id: object,
+    override_bp: float | None,
+    override_bn: float | None,
+) -> tuple[str, dict[str, float]] | None:
+    """
+    ``(steel_model, kwargs)`` for ``run_simulation`` (float block from ``SIM_PARAMS_FROM_ROW``).
+    Returns None if a required column is missing.
+    """
+    try:
+        sm, sim_kw = run_simulation_kwargs_from_prow(prow)
+    except KeyError as exc:
+        missing = exc.args[0] if exc.args else "?"
+        print(
+            f"  Skipping {specimen_id}, set {set_id}: parameters CSV missing column {missing!r} "
+            f"(need all of {list(SIM_PARAMS_FROM_ROW)})"
+        )
+        return None
+    if "L_y" not in prow.index or pd.isna(prow.get("L_y")):
+        sim_kw["L_y"] = float(catalog_row["L_y_in"])
+    if override_bp is not None:
+        sim_kw["b_p"] = float(override_bp)
+    if override_bn is not None:
+        sim_kw["b_n"] = float(override_bn)
+    return sm, sim_kw
+
+
 # Plot styling (numerical model curve); experimental color from ``plot_dimensions``.
-# Individual L-BFGS overlays: always **train** color. (Generalized/averaged per-specimen PNGs set train vs
-# validation in ``eval_averaged_params`` / ``optimize_generalized_brb_mse``.)
+# Individual L-BFGS overlays: always **train** color. (Generalized per-specimen PNGs set train vs
+# validation in ``optimize_generalized_brb_mse``.)
 COLOR_SIMULATED = COLOR_NUMERICAL_COHORT
-LINEWIDTH_SIMULATED = 0.9
-LINEWIDTH_EXPERIMENTAL = LINEWIDTH_SIMULATED  # same thickness as numerical on all overlays
+LINEWIDTH_SIMULATED = LINEWIDTH_HYSTERESIS_OVERLAY_SIMULATED
+LINEWIDTH_EXPERIMENTAL = LINEWIDTH_HYSTERESIS_OVERLAY_EXPERIMENTAL  # same thickness as numerical on all overlays
 # Digitized unordered experimental clouds (scatter ``s`` is marker area in points²).
 DIGITIZED_UNORDERED_OVERLAY_SCATTER_S = 5  # half of former 10
 DIGITIZED_UNORDERED_LEGEND_MARKERSIZE_PT = 3.5  # half of former 7 for combined-montage legend proxy
@@ -166,44 +214,45 @@ def plot_force_def_overlays(
     if show_numerical_curve:
         y_phys_components.append(F_sim_kip)
     # Physical units: P [kip] vs deformation [in]
-    fig1, ax1 = plt.subplots(figsize=SINGLE_FIGSIZE_IN, layout="constrained")
-    ax1.plot(
-        displacement_in,
-        F_exp_kip,
-        color=COLOR_EXPERIMENTAL,
-        alpha=0.95,
-        linewidth=LINEWIDTH_EXPERIMENTAL,
-        linestyle="-",
-        label="Experimental",
-    )
-    if show_numerical_curve:
+    with single_axis_style_context():
+        fig1, ax1 = plt.subplots(figsize=SINGLE_FIGSIZE_IN, layout="constrained")
         ax1.plot(
             displacement_in,
-            F_sim_kip,
-            color=numerical_color,
+            F_exp_kip,
+            color=COLOR_EXPERIMENTAL,
             alpha=0.95,
-            linewidth=LINEWIDTH_SIMULATED,
-            linestyle="--",
-            label="Numerical",
+            linewidth=LINEWIDTH_EXPERIMENTAL,
+            linestyle="-",
+            label="Experimental",
         )
-    set_symmetric_axes(ax1, displacement_in, np.concatenate(y_phys_components))
-    ax1.set_xlabel("Deformation [in]")
-    ax1.set_ylabel(PHYS_FORCE_KIP_LABEL)
-    h1, lab1 = ax1.get_legend_handles_labels()
-    fig1.legend(
-        h1,
-        lab1,
-        loc="outside upper center",
-        ncol=2,
-        fontsize=LEGEND_FONT_SIZE_SMALL_PT,
-        frameon=False,
-    )
-    ax1.grid(True, alpha=0.3)
-    ax1.axhline(0, color="k", linewidth=0.5)
-    ax1.axvline(0, color="k", linewidth=0.5)
-    style_axes_spines_and_ticks(ax1)
-    fig1.savefig(out_dir / f"{specimen_id}_set{set_id}_force_def.png", dpi=SAVE_DPI)
-    plt.close(fig1)
+        if show_numerical_curve:
+            ax1.plot(
+                displacement_in,
+                F_sim_kip,
+                color=numerical_color,
+                alpha=0.95,
+                linewidth=LINEWIDTH_SIMULATED,
+                linestyle="--",
+                label="Numerical",
+            )
+        set_symmetric_axes(ax1, displacement_in, np.concatenate(y_phys_components))
+        ax1.set_xlabel("Deformation [in]")
+        ax1.set_ylabel(PHYS_FORCE_KIP_LABEL)
+        h1, lab1 = ax1.get_legend_handles_labels()
+        fig1.legend(
+            h1,
+            lab1,
+            loc="outside upper center",
+            ncol=2,
+            fontsize=LEGEND_FONT_SIZE_SINGLE_AX_PT,
+            frameon=False,
+        )
+        ax1.grid(True, alpha=0.3)
+        ax1.axhline(0, color="k", linewidth=AXES_SPINE_LINEWIDTH_SINGLE_AX)
+        ax1.axvline(0, color="k", linewidth=AXES_SPINE_LINEWIDTH_SINGLE_AX)
+        style_single_axis_spines(ax1)
+        fig1.savefig(out_dir / f"{specimen_id}_set{set_id}_force_def.png", dpi=SAVE_DPI)
+        plt.close(fig1)
 
     # Normalized: F/(f_yc * A_c) vs delta/L_y
     fyA = fy_ksi * A_c_in2
@@ -213,52 +262,53 @@ def plot_force_def_overlays(
     F_exp_norm = F_exp_kip / fyA
     F_sim_norm = F_sim_kip / fyA
 
-    fig2, ax2 = plt.subplots(figsize=SINGLE_FIGSIZE_IN, layout="constrained")
-    ax2.plot(
-        disp_norm,
-        F_exp_norm,
-        color=COLOR_EXPERIMENTAL,
-        alpha=0.95,
-        linewidth=LINEWIDTH_EXPERIMENTAL,
-        linestyle="-",
-        label="Experimental",
-    )
-    y_norm_components = [F_exp_norm]
-    if show_numerical_curve:
+    with single_axis_style_context():
+        fig2, ax2 = plt.subplots(figsize=SINGLE_FIGSIZE_IN, layout="constrained")
         ax2.plot(
             disp_norm,
-            F_sim_norm,
-            color=numerical_color,
+            F_exp_norm,
+            color=COLOR_EXPERIMENTAL,
             alpha=0.95,
-            linewidth=LINEWIDTH_SIMULATED,
-            linestyle="--",
-            label="Numerical",
+            linewidth=LINEWIDTH_EXPERIMENTAL,
+            linestyle="-",
+            label="Experimental",
         )
-        y_norm_components.append(F_sim_norm)
-    if norm_xy_half is not None:
-        hx, hy = norm_xy_half
-        ax2.set_xlim(-hx, hx)
-        ax2.set_ylim(-hy, hy)
-    else:
-        set_symmetric_axes(ax2, disp_norm, np.concatenate(y_norm_components))
-    ax2.set_xlabel(NORM_STRAIN_LABEL)
-    ax2.set_ylabel(NORM_FORCE_LABEL)
-    apply_normalized_fu_axes(ax2)
-    h2, lab2 = ax2.get_legend_handles_labels()
-    fig2.legend(
-        h2,
-        lab2,
-        loc="outside upper center",
-        ncol=2,
-        fontsize=LEGEND_FONT_SIZE_SMALL_PT,
-        frameon=False,
-    )
-    ax2.grid(True, alpha=0.3)
-    ax2.axhline(0, color="k", linewidth=0.5)
-    ax2.axvline(0, color="k", linewidth=0.5)
-    style_axes_spines_and_ticks(ax2)
-    fig2.savefig(out_dir / f"{specimen_id}_set{set_id}_force_def_norm.png", dpi=SAVE_DPI)
-    plt.close(fig2)
+        y_norm_components = [F_exp_norm]
+        if show_numerical_curve:
+            ax2.plot(
+                disp_norm,
+                F_sim_norm,
+                color=numerical_color,
+                alpha=0.95,
+                linewidth=LINEWIDTH_SIMULATED,
+                linestyle="--",
+                label="Numerical",
+            )
+            y_norm_components.append(F_sim_norm)
+        if norm_xy_half is not None:
+            hx, hy = norm_xy_half
+            ax2.set_xlim(-hx, hx)
+            ax2.set_ylim(-hy, hy)
+        else:
+            set_symmetric_axes(ax2, disp_norm, np.concatenate(y_norm_components))
+        ax2.set_xlabel(NORM_STRAIN_LABEL)
+        ax2.set_ylabel(NORM_FORCE_LABEL)
+        apply_normalized_fu_axes(ax2)
+        h2, lab2 = ax2.get_legend_handles_labels()
+        fig2.legend(
+            h2,
+            lab2,
+            loc="outside upper center",
+            ncol=2,
+            fontsize=LEGEND_FONT_SIZE_SINGLE_AX_PT,
+            frameon=False,
+        )
+        ax2.grid(True, alpha=0.3)
+        ax2.axhline(0, color="k", linewidth=AXES_SPINE_LINEWIDTH_SINGLE_AX)
+        ax2.axvline(0, color="k", linewidth=AXES_SPINE_LINEWIDTH_SINGLE_AX)
+        style_single_axis_spines(ax2)
+        fig2.savefig(out_dir / f"{specimen_id}_set{set_id}_force_def_norm.png", dpi=SAVE_DPI)
+        plt.close(fig2)
 
 
 def plot_force_def_digitized_unordered_overlays(
@@ -289,45 +339,46 @@ def plot_force_def_digitized_unordered_overlays(
         y_phys_list.insert(0, np.asarray(F_sim_kip, dtype=float))
     y_phys = np.concatenate(y_phys_list)
 
-    fig1, ax1 = plt.subplots(figsize=SINGLE_FIGSIZE_IN, layout="constrained")
-    ax1.scatter(
-        u_unordered,
-        F_unordered,
-        s=DIGITIZED_UNORDERED_OVERLAY_SCATTER_S,
-        alpha=0.35,
-        c=COLOR_EXPERIMENTAL,
-        edgecolors="none",
-        rasterized=True,
-        label="Experimental",
-    )
-    if show_numerical_curve:
-        ax1.plot(
-            D_drive,
-            F_sim_kip,
-            color=numerical_color,
-            alpha=0.95,
-            linewidth=LINEWIDTH_SIMULATED,
-            linestyle="--",
-            label="Numerical",
+    with single_axis_style_context():
+        fig1, ax1 = plt.subplots(figsize=SINGLE_FIGSIZE_IN, layout="constrained")
+        ax1.scatter(
+            u_unordered,
+            F_unordered,
+            s=DIGITIZED_UNORDERED_OVERLAY_SCATTER_S,
+            alpha=0.35,
+            c=COLOR_EXPERIMENTAL,
+            edgecolors="none",
+            rasterized=True,
+            label="Experimental",
         )
-    set_symmetric_axes(ax1, x_phys, y_phys)
-    ax1.set_xlabel("Deformation [in]")
-    ax1.set_ylabel(PHYS_FORCE_KIP_LABEL)
-    h1, lab1 = ax1.get_legend_handles_labels()
-    fig1.legend(
-        h1,
-        lab1,
-        loc="outside upper center",
-        ncol=2,
-        fontsize=LEGEND_FONT_SIZE_SMALL_PT,
-        frameon=False,
-    )
-    ax1.grid(True, alpha=0.3)
-    ax1.axhline(0, color="k", linewidth=0.5)
-    ax1.axvline(0, color="k", linewidth=0.5)
-    style_axes_spines_and_ticks(ax1)
-    fig1.savefig(out_dir / f"{specimen_id}_set{safe}_force_def.png", dpi=SAVE_DPI)
-    plt.close(fig1)
+        if show_numerical_curve:
+            ax1.plot(
+                D_drive,
+                F_sim_kip,
+                color=numerical_color,
+                alpha=0.95,
+                linewidth=LINEWIDTH_SIMULATED,
+                linestyle="--",
+                label="Numerical",
+            )
+        set_symmetric_axes(ax1, x_phys, y_phys)
+        ax1.set_xlabel("Deformation [in]")
+        ax1.set_ylabel(PHYS_FORCE_KIP_LABEL)
+        h1, lab1 = ax1.get_legend_handles_labels()
+        fig1.legend(
+            h1,
+            lab1,
+            loc="outside upper center",
+            ncol=2,
+            fontsize=LEGEND_FONT_SIZE_SINGLE_AX_PT,
+            frameon=False,
+        )
+        ax1.grid(True, alpha=0.3)
+        ax1.axhline(0, color="k", linewidth=AXES_SPINE_LINEWIDTH_SINGLE_AX)
+        ax1.axvline(0, color="k", linewidth=AXES_SPINE_LINEWIDTH_SINGLE_AX)
+        style_single_axis_spines(ax1)
+        fig1.savefig(out_dir / f"{specimen_id}_set{safe}_force_def.png", dpi=SAVE_DPI)
+        plt.close(fig1)
 
     fyA = fy_ksi * A_c_in2
     if fyA <= 0 or L_y_in <= 0:
@@ -342,51 +393,52 @@ def plot_force_def_digitized_unordered_overlays(
         y_n_list.insert(0, F_sim_n)
     y_n = np.concatenate(y_n_list)
 
-    fig2, ax2 = plt.subplots(figsize=SINGLE_FIGSIZE_IN, layout="constrained")
-    ax2.scatter(
-        u_unordered_n,
-        F_unordered_n,
-        s=DIGITIZED_UNORDERED_OVERLAY_SCATTER_S,
-        alpha=0.35,
-        c=COLOR_EXPERIMENTAL,
-        edgecolors="none",
-        rasterized=True,
-        label="Experimental",
-    )
-    if show_numerical_curve:
-        ax2.plot(
-            disp_drive_n,
-            F_sim_n,
-            color=numerical_color,
-            alpha=0.95,
-            linewidth=LINEWIDTH_SIMULATED,
-            linestyle="--",
-            label="Numerical",
+    with single_axis_style_context():
+        fig2, ax2 = plt.subplots(figsize=SINGLE_FIGSIZE_IN, layout="constrained")
+        ax2.scatter(
+            u_unordered_n,
+            F_unordered_n,
+            s=DIGITIZED_UNORDERED_OVERLAY_SCATTER_S,
+            alpha=0.35,
+            c=COLOR_EXPERIMENTAL,
+            edgecolors="none",
+            rasterized=True,
+            label="Experimental",
         )
-    if norm_xy_half is not None:
-        hx, hy = norm_xy_half
-        ax2.set_xlim(-hx, hx)
-        ax2.set_ylim(-hy, hy)
-    else:
-        set_symmetric_axes(ax2, x_n, y_n)
-    ax2.set_xlabel(NORM_STRAIN_LABEL)
-    ax2.set_ylabel(NORM_FORCE_LABEL)
-    apply_normalized_fu_axes(ax2)
-    h2, lab2 = ax2.get_legend_handles_labels()
-    fig2.legend(
-        h2,
-        lab2,
-        loc="outside upper center",
-        ncol=2,
-        fontsize=LEGEND_FONT_SIZE_SMALL_PT,
-        frameon=False,
-    )
-    ax2.grid(True, alpha=0.3)
-    ax2.axhline(0, color="k", linewidth=0.5)
-    ax2.axvline(0, color="k", linewidth=0.5)
-    style_axes_spines_and_ticks(ax2)
-    fig2.savefig(out_dir / f"{specimen_id}_set{safe}_force_def_norm.png", dpi=SAVE_DPI)
-    plt.close(fig2)
+        if show_numerical_curve:
+            ax2.plot(
+                disp_drive_n,
+                F_sim_n,
+                color=numerical_color,
+                alpha=0.95,
+                linewidth=LINEWIDTH_SIMULATED,
+                linestyle="--",
+                label="Numerical",
+            )
+        if norm_xy_half is not None:
+            hx, hy = norm_xy_half
+            ax2.set_xlim(-hx, hx)
+            ax2.set_ylim(-hy, hy)
+        else:
+            set_symmetric_axes(ax2, x_n, y_n)
+        ax2.set_xlabel(NORM_STRAIN_LABEL)
+        ax2.set_ylabel(NORM_FORCE_LABEL)
+        apply_normalized_fu_axes(ax2)
+        h2, lab2 = ax2.get_legend_handles_labels()
+        fig2.legend(
+            h2,
+            lab2,
+            loc="outside upper center",
+            ncol=2,
+            fontsize=LEGEND_FONT_SIZE_SINGLE_AX_PT,
+            frameon=False,
+        )
+        ax2.grid(True, alpha=0.3)
+        ax2.axhline(0, color="k", linewidth=AXES_SPINE_LINEWIDTH_SINGLE_AX)
+        ax2.axvline(0, color="k", linewidth=AXES_SPINE_LINEWIDTH_SINGLE_AX)
+        style_single_axis_spines(ax2)
+        fig2.savefig(out_dir / f"{specimen_id}_set{safe}_force_def_norm.png", dpi=SAVE_DPI)
+        plt.close(fig2)
 
 
 def plot_unordered_binned_cloud_envelopes(
@@ -429,95 +481,96 @@ def plot_unordered_binned_cloud_envelopes(
     )
     del _u_c2
 
-    fig, ax = plt.subplots(figsize=SINGLE_FIGSIZE_IN, layout="constrained")
+    with single_axis_style_context():
+        fig, ax = plt.subplots(figsize=SINGLE_FIGSIZE_IN, layout="constrained")
 
-    # Light scatter so binned upper/lower curves remain the visual focus.
-    ax.scatter(
-        u_e,
-        f_e,
-        s=1.125,
-        alpha=0.10,
-        c=COLOR_EXPERIMENTAL,
-        edgecolors="none",
-        rasterized=True,
-        label="Exp. cloud",
-        zorder=1,
-    )
-    ax.scatter(
-        u_n,
-        f_n,
-        s=2.0,
-        alpha=0.12,
-        c=COLOR_NUMERICAL_COHORT,
-        edgecolors="none",
-        rasterized=True,
-        label="Num. cloud",
-        zorder=1,
-    )
+        # Light scatter so binned upper/lower curves remain the visual focus.
+        ax.scatter(
+            u_e,
+            f_e,
+            s=1.125,
+            alpha=0.10,
+            c=COLOR_EXPERIMENTAL,
+            edgecolors="none",
+            rasterized=True,
+            label="Exp. cloud",
+            zorder=1,
+        )
+        ax.scatter(
+            u_n,
+            f_n,
+            s=2.0,
+            alpha=0.12,
+            c=COLOR_NUMERICAL_COHORT,
+            edgecolors="none",
+            rasterized=True,
+            label="Num. cloud",
+            zorder=1,
+        )
 
-    # No fill_between: shaded bands between upper/lower obscured the cloud vs envelope comparison.
+        # No fill_between: shaded bands between upper/lower obscured the cloud vs envelope comparison.
 
-    _env_lw = 1.65
-    ax.plot(
-        u_c,
-        e_up,
-        color=COLOR_EXPERIMENTAL,
-        linewidth=_env_lw,
-        linestyle="-",
-        label="Exp. upper",
-        zorder=4,
-    )
-    ax.plot(
-        u_c,
-        e_lo,
-        color=COLOR_EXPERIMENTAL,
-        linewidth=_env_lw,
-        linestyle="--",
-        label="Exp. lower",
-        zorder=4,
-    )
-    ax.plot(
-        u_c,
-        n_up,
-        color=COLOR_NUMERICAL_COHORT,
-        linewidth=_env_lw,
-        linestyle="-",
-        label="Num. upper",
-        zorder=4,
-    )
-    ax.plot(
-        u_c,
-        n_lo,
-        color=COLOR_NUMERICAL_COHORT,
-        linewidth=_env_lw,
-        linestyle="--",
-        label="Num. lower",
-        zorder=4,
-    )
+        _env_lw = 1.65 * HYSTERESIS_LINEWIDTH_SCALE_OVERLAYS
+        ax.plot(
+            u_c,
+            e_up,
+            color=COLOR_EXPERIMENTAL,
+            linewidth=_env_lw,
+            linestyle="-",
+            label="Exp. upper",
+            zorder=4,
+        )
+        ax.plot(
+            u_c,
+            e_lo,
+            color=COLOR_EXPERIMENTAL,
+            linewidth=_env_lw,
+            linestyle="--",
+            label="Exp. lower",
+            zorder=4,
+        )
+        ax.plot(
+            u_c,
+            n_up,
+            color=COLOR_NUMERICAL_COHORT,
+            linewidth=_env_lw,
+            linestyle="-",
+            label="Num. upper",
+            zorder=4,
+        )
+        ax.plot(
+            u_c,
+            n_lo,
+            color=COLOR_NUMERICAL_COHORT,
+            linewidth=_env_lw,
+            linestyle="--",
+            label="Num. lower",
+            zorder=4,
+        )
 
-    x_all = np.concatenate([u_e, u_n])
-    y_all = np.concatenate([f_e, f_n, e_up[np.isfinite(e_up)], e_lo[np.isfinite(e_lo)], n_up[np.isfinite(n_up)], n_lo[np.isfinite(n_lo)]])
-    set_symmetric_axes(ax, x_all, y_all)
-    ax.set_xlabel(NORM_STRAIN_LABEL)
-    ax.set_ylabel(NORM_FORCE_LABEL)
-    apply_normalized_fu_axes(ax)
-    ax.grid(True, alpha=0.25)
-    ax.axhline(0, color="k", linewidth=0.5)
-    ax.axvline(0, color="k", linewidth=0.5)
-    style_axes_spines_and_ticks(ax)
+        x_all = np.concatenate([u_e, u_n])
+        y_all = np.concatenate([f_e, f_n, e_up[np.isfinite(e_up)], e_lo[np.isfinite(e_lo)], n_up[np.isfinite(n_up)], n_lo[np.isfinite(n_lo)]])
+        set_symmetric_axes(ax, x_all, y_all)
+        ax.set_xlabel(NORM_STRAIN_LABEL)
+        ax.set_ylabel(NORM_FORCE_LABEL)
+        apply_normalized_fu_axes(ax)
+        ax.grid(True, alpha=0.25)
+        ax.axhline(0, color="k", linewidth=AXES_SPINE_LINEWIDTH_SINGLE_AX)
+        ax.axvline(0, color="k", linewidth=AXES_SPINE_LINEWIDTH_SINGLE_AX)
+        style_single_axis_spines(ax)
 
-    h, l = ax.get_legend_handles_labels()
-    _binenv_legend_pt = max(5.0, LEGEND_FONT_SIZE_SMALL_PT - 1.0)
-    fig.legend(
-        h,
-        l,
-        loc="outside upper center",
-        ncol=3,
-        fontsize=_binenv_legend_pt,
-        frameon=False,
-    )
-    fig.savefig(out_dir / f"{specimen_id}_set{safe}_binned_cloud_envelope_norm.png", dpi=SAVE_DPI)
-    plt.close(fig)
+        h, l = ax.get_legend_handles_labels()
+        _binenv_legend_pt = max(3.0, LEGEND_FONT_SIZE_SINGLE_AX_PT - 1.0)
+        fig.legend(
+            h,
+            l,
+            loc="outside upper center",
+            ncol=3,
+            fontsize=_binenv_legend_pt,
+            frameon=False,
+        )
+        fig.savefig(out_dir / f"{specimen_id}_set{safe}_binned_cloud_envelope_norm.png", dpi=SAVE_DPI)
+        plt.close(fig)
 
 
 def run_one_specimen(
@@ -545,7 +598,6 @@ def run_one_specimen(
 
     for _, prow in params_rows.iterrows():
         set_id = prow.get("set_id", 1)
-        fy = float(prow["fyp"])
         if (
             "A_sc" not in prow
             or "A_t" not in prow
@@ -554,44 +606,20 @@ def run_one_specimen(
         ):
             print(f"  Skipping {specimen_id}, set {set_id}: need A_sc and A_t in parameters CSV")
             continue
-        A_sc = float(prow["A_sc"])
-        A_t = float(prow["A_t"])
-        L_T_param = float(prow["L_T"])
-        if "L_y" in prow and pd.notna(prow.get("L_y")):
-            L_y = float(prow["L_y"])
-        else:
-            L_y = float(catalog_row["L_y_in"])
-        E_val = float(prow["E"])
-        b_n = float(override_bn) if override_bn is not None else float(prow["b_n"])
-        b_p = float(override_bp) if override_bp is not None else float(prow["b_p"])
-        a1 = float(prow["a1"])
-        a2 = float(prow["a2"])
-        a3 = float(prow["a3"])
-        a4 = float(prow["a4"])
-        R0 = float(prow["R0"])
-        cR1 = float(prow["cR1"])
-        cR2 = float(prow["cR2"])
+        sk = _path_ordered_sim_kwargs(
+            prow,
+            catalog_row,
+            specimen_id=specimen_id,
+            set_id=set_id,
+            override_bp=override_bp,
+            override_bn=override_bn,
+        )
+        if sk is None:
+            continue
+        sm, sim_kw = sk
 
         try:
-            F_sim = run_simulation(
-                displacement,
-                L_T=L_T_param,
-                L_y=L_y,
-                A_sc=A_sc,
-                A_t=A_t,
-                fyp=fy,
-                fyn=fy,
-                E=E_val,
-                b_p=b_p,
-                b_n=b_n,
-                R0=R0,
-                cR1=cR1,
-                cR2=cR2,
-                a1=a1,
-                a2=a2,
-                a3=a3,
-                a4=a4,
-            )
+            F_sim = run_simulation(displacement, steel_model=sm, **sim_kw)
         except Exception as exc:  # pragma: no cover - defensive
             print(f"  Simulation failed for {specimen_id}, set {set_id}: {exc}")
             continue
@@ -609,9 +637,9 @@ def run_one_specimen(
             displacement,
             F_exp,
             F_sim,
-            fy_ksi=fy,
-            A_c_in2=A_sc,
-            L_y_in=L_y,
+            fy_ksi=float(sim_kw["fyp"]),
+            A_c_in2=float(sim_kw["A_sc"]),
+            L_y_in=float(sim_kw["L_y"]),
             set_id=set_id,
             out_dir=out_dir,
             norm_xy_half=norm_xy_half,
@@ -646,7 +674,6 @@ def write_one_specimen_simulated_csvs(
 
     for _, prow in params_rows.iterrows():
         set_id = prow.get("set_id", 1)
-        fy = float(prow["fyp"])
         if (
             "A_sc" not in prow
             or "A_t" not in prow
@@ -655,44 +682,20 @@ def write_one_specimen_simulated_csvs(
         ):
             print(f"  Skipping {specimen_id}, set {set_id}: need A_sc and A_t in parameters CSV")
             continue
-        A_sc = float(prow["A_sc"])
-        A_t = float(prow["A_t"])
-        L_T_param = float(prow["L_T"])
-        if "L_y" in prow and pd.notna(prow.get("L_y")):
-            L_y = float(prow["L_y"])
-        else:
-            L_y = float(catalog_row["L_y_in"])
-        E_val = float(prow["E"])
-        b_n = float(override_bn) if override_bn is not None else float(prow["b_n"])
-        b_p = float(override_bp) if override_bp is not None else float(prow["b_p"])
-        a1 = float(prow["a1"])
-        a2 = float(prow["a2"])
-        a3 = float(prow["a3"])
-        a4 = float(prow["a4"])
-        R0 = float(prow["R0"])
-        cR1 = float(prow["cR1"])
-        cR2 = float(prow["cR2"])
+        sk = _path_ordered_sim_kwargs(
+            prow,
+            catalog_row,
+            specimen_id=specimen_id,
+            set_id=set_id,
+            override_bp=override_bp,
+            override_bn=override_bn,
+        )
+        if sk is None:
+            continue
+        sm, sim_kw = sk
 
         try:
-            F_sim = run_simulation(
-                displacement,
-                L_T=L_T_param,
-                L_y=L_y,
-                A_sc=A_sc,
-                A_t=A_t,
-                fyp=fy,
-                fyn=fy,
-                E=E_val,
-                b_p=b_p,
-                b_n=b_n,
-                R0=R0,
-                cR1=cR1,
-                cR2=cR2,
-                a1=a1,
-                a2=a2,
-                a3=a3,
-                a4=a4,
-            )
+            F_sim = run_simulation(displacement, steel_model=sm, **sim_kw)
         except Exception as exc:  # pragma: no cover - defensive
             print(f"  Simulation failed for {specimen_id}, set {set_id}: {exc}")
             continue
@@ -715,6 +718,54 @@ def write_one_specimen_simulated_csvs(
     return n_ok
 
 
+def write_unordered_simulated_csv_for_set(
+    *,
+    specimen_id: str,
+    set_id: int,
+    prow: pd.Series,
+    catalog_by_name: pd.DataFrame,
+    sim_dir: Path,
+    project_root: Path | None = None,
+) -> bool:
+    """
+    One digitized-unordered simulated history: drive from ``load_digitized_unordered_series``,
+    ``Force_sim`` along the drive, experimental force column NaN (combined-overlay convention).
+    """
+    from calibrate.optimize_brb_mse import run_simulation_kwargs_from_prow, save_simulated_force_history_csv
+
+    root = project_root or _PROJECT_ROOT
+    cat_row = catalog_by_name.loc[specimen_id]
+    if isinstance(cat_row, pd.DataFrame):
+        cat_row = cat_row.iloc[0]
+    series = load_digitized_unordered_series(
+        specimen_id,
+        root,
+        steel_row=prow,
+        catalog_row=cat_row,
+    )
+    if series is None:
+        print(f"  skip unordered {specimen_id} set {set_id}: digitized load failed")
+        return False
+    D_drive, u_c, F_c = series
+    eval_row = prow.copy()
+    sim_row = eval_row_with_envelope_bn_from_unordered(eval_row, cat_row, u_c, F_c)
+    try:
+        sm, kw = run_simulation_kwargs_from_prow(sim_row)
+        F_sim = np.asarray(run_simulation(D_drive, steel_model=sm, **kw), dtype=float)
+    except Exception as exc:
+        print(f"  skip unordered {specimen_id} set {set_id}: simulation failed: {exc}")
+        return False
+    if F_sim.shape != D_drive.shape:
+        print(f"  skip unordered {specimen_id} set {set_id}: shape mismatch")
+        return False
+    F_exp_na = np.full_like(D_drive, np.nan, dtype=float)
+    out = save_simulated_force_history_csv(sim_dir, specimen_id, set_id, D_drive, F_exp_na, F_sim)
+    if out is not None:
+        print(f"  Wrote {out.name}")
+        return True
+    return False
+
+
 def run_multi_specimen_simulated_csvs(
     params_df: pd.DataFrame,
     sim_dir: Path,
@@ -723,8 +774,19 @@ def run_multi_specimen_simulated_csvs(
     specimen: str | None = None,
     override_bp: float | None = None,
     override_bn: float | None = None,
+    require_individual_optimize: bool = True,
+    include_digitized_unordered: bool = False,
 ) -> None:
-    """Write ``*_simulated.csv`` for path-ordered individual_optimize specimens (same filters as overlays)."""
+    """
+    Write ``*_simulated.csv`` under ``sim_dir``.
+
+    Path-ordered specimens use resampled ``force_deformation.csv``. When ``require_individual_optimize``
+    is True (default), only catalog rows with ``individual_optimize=true`` are included. When False,
+    every path-ordered name in the parameters table with resampled data is included.
+
+    When ``include_digitized_unordered`` is True, also writes histories for catalog digitized-unordered
+    specimens present in ``params_df`` (one file per parameter row / ``set_id``).
+    """
     if "Name" not in params_df.columns:
         raise RuntimeError(f"'Name' column not found in parameters ({params_path_label})")
 
@@ -738,42 +800,65 @@ def run_multi_specimen_simulated_csvs(
     param_names = set(params_df["Name"].astype(str))
     catalog_names = set(catalog["Name"].astype(str))
     with_data = sorted(param_names & catalog_names & resampled_stems)
-    available = [
-        s for s in with_data if get_specimen_record(str(s).strip(), catalog).individual_optimize
-    ]
-    if not available:
-        print(
-            "No specimens found with individual_optimize=true, parameters, catalog entry, "
-            "and resampled data."
-        )
-        return
+    if require_individual_optimize:
+        available_path = [
+            s for s in with_data if get_specimen_record(str(s).strip(), catalog).individual_optimize
+        ]
+    else:
+        available_path = list(with_data)
+
+    unordered_eligible: set[str] = set()
+    if include_digitized_unordered:
+        unordered_eligible = set(list_names_digitized_unordered(catalog, project_root=_PROJECT_ROOT))
+    available_unordered = sorted(param_names & catalog_names & unordered_eligible)
 
     if specimen:
         sid = str(specimen).strip()
         if sid not in catalog_names:
             print(f"Specimen {sid} not found in {CATALOG_PATH}")
             return
-        if not get_specimen_record(sid, catalog).individual_optimize:
-            print(
-                f"Specimen {sid} has individual_optimize=false (e.g. digitized unordered). "
-                "Preset combined overlays only cover path-ordered specimens."
-            )
+        specimens_path = [sid] if sid in available_path else []
+        specimens_unordered = [sid] if (include_digitized_unordered and sid in available_unordered) else []
+        if not specimens_path and not specimens_unordered:
+            if include_digitized_unordered and sid in param_names and sid in unordered_eligible:
+                print(
+                    f"Specimen {sid}: not in path-ordered resampled set; "
+                    "if digitized unordered, ensure inputs exist on disk."
+                )
+            elif require_individual_optimize:
+                print(
+                    f"Specimen {sid} not available for this mode: need individual_optimize=true, "
+                    "parameters row, and resampled force_deformation.csv (path-ordered), "
+                    "or use --scope all with digitized-unordered inputs."
+                )
+            else:
+                print(
+                    f"Specimen {sid} not available: need parameters row and "
+                    "path-ordered resampled data and/or digitized-unordered inputs."
+                )
             return
-        if sid not in available:
-            print(
-                f"Specimen {sid} not available. "
-                "It must exist in the parameters table and data/resampled/{Name}/force_deformation.csv with "
-                "individual_optimize=true."
-            )
-            return
-        specimens = [sid]
     else:
-        specimens = available
+        specimens_path = available_path
+        specimens_unordered = available_unordered
+
+    if not specimens_path and not specimens_unordered:
+        msg_parts = []
+        if require_individual_optimize and not include_digitized_unordered:
+            msg_parts.append(
+                "No specimens with individual_optimize=true, parameters, catalog entry, and resampled data."
+            )
+        elif not include_digitized_unordered:
+            msg_parts.append("No path-ordered specimens with parameters, catalog entry, and resampled data.")
+        else:
+            msg_parts.append("No matching path-ordered or digitized-unordered specimens for parameters CSV.")
+        print(" ".join(msg_parts))
+        return
 
     if override_bp is not None or override_bn is not None:
         print(f"  Overriding b_p={override_bp}, b_n={override_bn} (None = use CSV per row)")
-    print(f"Writing simulated CSVs into {sim_dir} for specimens: {', '.join(specimens)}")
-    for sid in specimens:
+    all_label = ", ".join([*specimens_path, *specimens_unordered])
+    print(f"Writing simulated CSVs into {sim_dir} for specimens: {all_label}")
+    for sid in specimens_path:
         if sid not in params_grouped.groups:
             print(f"Skipping {sid}: no parameter rows found in {params_path_label}")
             continue
@@ -788,6 +873,28 @@ def run_multi_specimen_simulated_csvs(
             override_bp=override_bp,
             override_bn=override_bn,
         )
+
+    for name in specimens_unordered:
+        if name not in params_grouped.groups:
+            print(f"Skipping unordered {name}: no parameter rows found in {params_path_label}")
+            continue
+        if name not in catalog_by_name.index:
+            continue
+        group = params_grouped.get_group(name)
+        for _, prow in group.iterrows():
+            try:
+                sid_num = int(pd.to_numeric(prow["set_id"], errors="raise"))
+            except Exception:
+                print(f"  skip unordered {name}: bad set_id in parameters")
+                continue
+            write_unordered_simulated_csv_for_set(
+                specimen_id=name,
+                set_id=sid_num,
+                prow=prow,
+                catalog_by_name=catalog_by_name,
+                sim_dir=sim_dir,
+                project_root=_PROJECT_ROOT,
+            )
 
 
 def run_multi_specimen_overlays(
@@ -836,8 +943,7 @@ def run_multi_specimen_overlays(
         if not get_specimen_record(sid, catalog).individual_optimize:
             print(
                 f"Specimen {sid} has individual_optimize=false (e.g. digitized unordered). "
-                "Use averaged or generalized evaluation overlays instead: "
-                "results/plots/calibration/averaged_optimize/overlays/ or "
+                "Use generalized evaluation overlays instead: "
                 "results/plots/calibration/generalized_optimize/overlays/."
             )
             return

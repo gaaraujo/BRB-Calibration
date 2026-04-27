@@ -31,7 +31,10 @@ sys.path.insert(0, str(_SCRIPTS))
 sys.path.insert(0, str(_SCRIPTS / "postprocess"))
 
 from calibrate.pipeline_log import line, run_banner, section  # noqa: E402
-from calibrate.optimize_brb_mse import AMPLITUDE_WEIGHTS_ARG_HELP  # noqa: E402
+from calibrate.optimize_brb_mse import (  # noqa: E402
+    AMPLITUDE_WEIGHTS_ARG_HELP,
+    run_simulation_kwargs_from_prow,
+)
 from calibrate.amplitude_mse_partition import (  # noqa: E402
     build_amplitude_weights,
     cycle_abs_trapz_work,
@@ -44,7 +47,9 @@ from calibrate.debug_sim_cache import (  # noqa: E402
 from model.corotruss import run_simulation  # noqa: E402
 from postprocess.cycle_points import find_cycle_points, load_cycle_points_resampled  # noqa: E402
 from postprocess.plot_dimensions import (  # noqa: E402
+    AXES_SPINE_LINEWIDTH,
     COLOR_EXPERIMENTAL,
+    HYSTERESIS_LINEWIDTH_SCALE,
     SAVE_DPI,
     configure_matplotlib_style,
     figsize_for_grid,
@@ -76,12 +81,6 @@ COLOR_SIMULATED = "black"
 plt.rcParams["figure.facecolor"] = "white"
 plt.rcParams["axes.facecolor"] = "white"
 configure_matplotlib_style()
-
-
-def _row_to_sim_params(prow: pd.Series) -> dict:
-    """Map params CSV row to run_simulation keyword arguments."""
-    keys = ("L_T", "L_y", "A_sc", "A_t", "fyp", "fyn", "E", "b_p", "b_n", "R0", "cR1", "cR2", "a1", "a2", "a3", "a4")
-    return {k: float(prow[k]) for k in keys}
 
 
 def plot_specimen_cycles(
@@ -138,17 +137,23 @@ def plot_specimen_cycles(
                 color=COLOR_EXPERIMENTAL,
                 label=r"$\int P_{\mathrm{exp}}\,\mathrm{d}\delta$ (signed)",
             )
-        ax.plot(d_n, f_e_n, color=COLOR_EXPERIMENTAL, linewidth=1.0, label=r"$P_{\mathrm{exp}}$")
+        ax.plot(
+            d_n,
+            f_e_n,
+            color=COLOR_EXPERIMENTAL,
+            linewidth=1.0 * HYSTERESIS_LINEWIDTH_SCALE,
+            label=r"$P_{\mathrm{exp}}$",
+        )
         ax.plot(
             d_n,
             f_s_n,
             color=COLOR_SIMULATED,
-            linewidth=0.9,
+            linewidth=0.9 * HYSTERESIS_LINEWIDTH_SCALE,
             linestyle="--",
             label="P_sim",
         )
-        ax.axhline(0.0, color="k", linewidth=0.4, alpha=0.5)
-        ax.axvline(0.0, color="k", linewidth=0.4, alpha=0.5)
+        ax.axhline(0.0, color="k", linewidth=AXES_SPINE_LINEWIDTH, alpha=0.5)
+        ax.axvline(0.0, color="k", linewidth=AXES_SPINE_LINEWIDTH, alpha=0.5)
 
         e_e = cycle_abs_trapz_work(D_exp, F_exp, s, e)
         e_s = cycle_abs_trapz_work(D_exp, F_sim, s, e)
@@ -254,7 +259,7 @@ def main() -> None:
         rows = params_df[params_df["Name"].astype(str) == sid]
         for _, prow in rows.iterrows():
             set_id = prow.get("set_id", "?")
-            sim_kw = _row_to_sim_params(prow)
+            sm, sim_kw = run_simulation_kwargs_from_prow(prow)
             F_sim = None
             if args.sim_cache:
                 F_sim = try_load_cached_fsim(out_dir, sid, set_id, params_path, sim_kw)
@@ -262,7 +267,7 @@ def main() -> None:
                     line(f"{sid} set {set_id}: using cached F_sim (--sim-cache)")
             if F_sim is None:
                 try:
-                    F_sim = np.asarray(run_simulation(D_exp, **sim_kw), dtype=float)
+                    F_sim = np.asarray(run_simulation(D_exp, steel_model=sm, **sim_kw), dtype=float)
                 except Exception as e:
                     line(f"{sid} set {set_id}: simulation failed ({e})")
                     continue

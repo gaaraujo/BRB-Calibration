@@ -1,4 +1,5 @@
-# Zip everything clean_outputs.ps1 would wipe, plus full results/plots and results/calibration.
+# Zip everything clean_outputs.ps1 would wipe: data/* pipeline subtrees, full results/plots,
+# results/calibration, and summary_statistics/ (entire tree).
 # Run from repo root: .\archive_pipeline_outputs.ps1 [-Label myrun]
 # Output: run_snapshots/<yyyyMMdd_HHmmss>_<Label>.zip - unzip at repo root to restore paths.
 
@@ -28,17 +29,6 @@ $dataDirs = @(
     "data\cycle_points_original",
     "data\cycle_points_resampled"
 )
-$rootFiles = @(
-    "summary_statistics\calibration_parameter_summary.md",
-    "summary_statistics\calibration_parameter_summary_generalized.csv",
-    "summary_statistics\calibration_parameter_summary_individual.csv",
-    "summary_statistics\calibration_parameter_summary_generalized_by_set.csv",
-    "summary_statistics\calibration_parameter_summary_individual_by_set.csv",
-    "summary_statistics\generalized_set_id_eval_summary.csv",
-    "summary_statistics\generalized_unordered_J_binenv_summary_train.csv",
-    "summary_statistics\generalized_unordered_J_binenv_summary_validation.csv"
-)
-
 $included = New-Object System.Collections.Generic.List[string]
 
 function Try-GitHead {
@@ -66,7 +56,7 @@ try {
         $included.Add($rel.Replace('\', '/'))
     }
 
-    foreach ($rel in @("results\plots", "results\calibration")) {
+    foreach ($rel in @("results\plots", "results\calibration", "summary_statistics")) {
         $src = Join-Path $root $rel
         if (-not (Test-Path -LiteralPath $src)) { continue }
         $parent = Split-Path -Parent $rel
@@ -74,16 +64,6 @@ try {
         $destParent = Join-Path $staging $parent
         New-Item -ItemType Directory -Force -Path $destParent | Out-Null
         Copy-Item -LiteralPath $src -Destination (Join-Path $destParent $leaf) -Recurse -Force
-        $included.Add($rel.Replace('\', '/'))
-    }
-
-    foreach ($rel in $rootFiles) {
-        $src = Join-Path $root $rel
-        if (-not (Test-Path -LiteralPath $src)) { continue }
-        $dest = Join-Path $staging $rel
-        $destParent = Split-Path -Parent $dest
-        New-Item -ItemType Directory -Force -Path $destParent | Out-Null
-        Copy-Item -LiteralPath $src -Destination $dest -Force
         $included.Add($rel.Replace('\', '/'))
     }
 

@@ -1,6 +1,9 @@
 """Shared figure sizes (inches), DPI, and typography for BRB-Calibration plots."""
 from __future__ import annotations
 
+from contextlib import contextmanager
+from typing import Iterator
+
 import matplotlib.pyplot as plt
 
 # Point size: labels, ticks, titles, legend (single consistent base).
@@ -41,6 +44,16 @@ SAVE_DPI: int = 300
 # Experimental / test hysteresis and clouds (experimental overlays solid ``'-'``; numerical ``'--'``).
 COLOR_EXPERIMENTAL: str = "#B0B0B0"
 
+# Stroke scale for F–δ (and similar) hysteresis traces vs prior nominal linewidths (specimen loops, b-slopes, etc.).
+HYSTERESIS_LINEWIDTH_SCALE: float = 0.6
+LINEWIDTH_HYSTERESIS_EXPERIMENTAL: float = 0.9 * HYSTERESIS_LINEWIDTH_SCALE
+LINEWIDTH_HYSTERESIS_SIMULATED: float = LINEWIDTH_HYSTERESIS_EXPERIMENTAL
+
+# Combined exp/sim overlays (``plot_params_vs_filtered``, ``plot_compare_calibration_overlays``, bayesian): 80 % of nominal 0.9.
+HYSTERESIS_LINEWIDTH_SCALE_OVERLAYS: float = 0.8
+LINEWIDTH_HYSTERESIS_OVERLAY_EXPERIMENTAL: float = 0.9 * HYSTERESIS_LINEWIDTH_SCALE_OVERLAYS
+LINEWIDTH_HYSTERESIS_OVERLAY_SIMULATED: float = LINEWIDTH_HYSTERESIS_OVERLAY_EXPERIMENTAL
+
 # Numerical / simulated in calibration overlays (pair with ``COLOR_EXPERIMENTAL``):
 # ``COLOR_NUMERICAL_COHORT`` — train; ``COLOR_NUMERICAL_COHORT_AUX`` — validation
 # (zero-weight path rows, scatter-cloud cohort panels).
@@ -50,6 +63,12 @@ COLOR_NUMERICAL_COHORT_AUX: str = "#FF0E00"
 # Full data-area rectangle (four spines); separate from ``Axes.patch`` fill outline.
 AXES_SPINE_COLOR: str = "black"
 AXES_SPINE_LINEWIDTH: float = 0.4
+
+# One-axis figures at ``SINGLE_FIGSIZE_IN``: thinner frame/ticks and smaller type than montages.
+SINGLE_AX_PLOT_FRAME_TICK_FONT_SCALE: float = 0.6
+AXES_SPINE_LINEWIDTH_SINGLE_AX: float = AXES_SPINE_LINEWIDTH * SINGLE_AX_PLOT_FRAME_TICK_FONT_SCALE
+PLOT_FONT_SIZE_SINGLE_AX_PT: float = PLOT_FONT_SIZE_PT * SINGLE_AX_PLOT_FRAME_TICK_FONT_SCALE
+LEGEND_FONT_SIZE_SINGLE_AX_PT: float = LEGEND_FONT_SIZE_SMALL_PT * SINGLE_AX_PLOT_FRAME_TICK_FONT_SCALE
 
 
 def style_major_tick_lines(
@@ -65,6 +84,41 @@ def style_major_tick_lines(
         for line in axis.get_ticklines(minor=False):
             line.set_color(col)
             line.set_linewidth(lw)
+
+
+def single_axis_plot_rcparams() -> dict[str, float]:
+    """rcParams for one small panel (``SINGLE_FIGSIZE_IN``): scaled font and major-tick stroke vs ``configure_matplotlib_style``."""
+    fs = PLOT_FONT_SIZE_SINGLE_AX_PT
+    tw = AXES_SPINE_LINEWIDTH_SINGLE_AX
+    leg = max(fs - 0.75, 3.0)
+    return {
+        "font.size": fs,
+        "axes.titlesize": fs,
+        "axes.labelsize": fs,
+        "xtick.labelsize": fs,
+        "ytick.labelsize": fs,
+        "legend.fontsize": leg,
+        "figure.titlesize": fs,
+        "xtick.major.width": tw,
+        "ytick.major.width": tw,
+    }
+
+
+def style_single_axis_spines(ax: plt.Axes, *, color: str | None = None) -> None:
+    """Spine + major tick lines for ``SINGLE_FIGSIZE_IN`` figures (matches ``single_axis_plot_rcparams`` tick width)."""
+    style_axes_spines_and_ticks(ax, linewidth=AXES_SPINE_LINEWIDTH_SINGLE_AX, color=color)
+
+
+@contextmanager
+def single_axis_style_context() -> Iterator[None]:
+    """Temporarily apply ``single_axis_plot_rcparams`` (font + major tick width) around one small-panel figure."""
+    rc = single_axis_plot_rcparams()
+    prev = {k: plt.rcParams[k] for k in rc}
+    plt.rcParams.update(rc)
+    try:
+        yield
+    finally:
+        plt.rcParams.update(prev)
 
 
 def style_axes_spines_and_ticks(
@@ -134,6 +188,28 @@ def grid_montage_rcparams() -> dict[str, float]:
         "legend.fontsize": LEGEND_FONT_SIZE_GRID_MONTAGE_PT,
         "figure.titlesize": fs,
     }
+
+
+# Major/minor tick **length** only (rc ``*.major.size`` / ``*.minor.size``) on combined exp/sim F–δ overlay grids.
+OVERLAY_GRID_TICK_LENGTH_SCALE: float = SINGLE_AX_PLOT_FRAME_TICK_FONT_SCALE
+
+
+def overlay_grid_montage_rcparams() -> dict[str, float]:
+    """Like ``grid_montage_rcparams`` with shorter major/minor tick marks (length only; linewidth matches spines)."""
+    d = dict(grid_montage_rcparams())
+    s = OVERLAY_GRID_TICK_LENGTH_SCALE
+    # Matplotlib defaults (pt): major ~3.5, minor ~2.0.
+    major_len = 3.5 * s
+    minor_len = 2.0 * s
+    d.update(
+        {
+            "xtick.major.size": major_len,
+            "ytick.major.size": major_len,
+            "xtick.minor.size": minor_len,
+            "ytick.minor.size": minor_len,
+        }
+    )
+    return d
 
 
 def b_vs_geometry_rcparams() -> dict[str, float]:

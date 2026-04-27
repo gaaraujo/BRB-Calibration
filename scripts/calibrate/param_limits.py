@@ -54,9 +54,10 @@ def _resolve_columns(df: pd.DataFrame, path: Path) -> tuple[str, str, str]:
     return param_src, lower_src, upper_src
 
 
-def load_param_limits(path: Path | None = None) -> dict[str, tuple[float, float]]:
+def read_param_limits_table(path: Path | None = None) -> pd.DataFrame:
     """
-    Read ``parameter, lower, upper`` rows. Raises if the file is missing, empty, or invalid.
+    Read ``params_limits.csv`` with the same options as other config tables: ``skipinitialspace`` and
+    stripped column names (aligned / padded spreadsheet exports).
     """
     csv_path = Path(path).expanduser().resolve() if path is not None else PARAM_LIMITS_CSV
     if not csv_path.is_file():
@@ -64,7 +65,17 @@ def load_param_limits(path: Path | None = None) -> dict[str, tuple[float, float]
             f"Parameter limits CSV not found: {csv_path}. "
             "Create config/calibration/params_limits.csv or pass --param-limits."
         )
-    df = pd.read_csv(csv_path, comment="#")
+    df = pd.read_csv(csv_path, comment="#", skipinitialspace=True)
+    df.columns = df.columns.astype(str).str.strip()
+    return df
+
+
+def load_param_limits(path: Path | None = None) -> dict[str, tuple[float, float]]:
+    """
+    Read ``parameter, lower, upper`` rows. Raises if the file is missing, empty, or invalid.
+    """
+    csv_path = Path(path).expanduser().resolve() if path is not None else PARAM_LIMITS_CSV
+    df = read_param_limits_table(path)
     if df.empty:
         raise ValueError(f"No data rows in {csv_path} (after comment lines).")
     pcol, lcol, ucol = _resolve_columns(df, csv_path)

@@ -1,16 +1,18 @@
 """
-Per-``set_id`` lists of parameters optimized by L-BFGS-B (individual / generalized / averaged eval).
+Per-``set_id`` lists of parameters optimized by L-BFGS-B (individual / generalized stages).
 
 ``optimize_params`` cells split on **commas** first; each segment is normalized (lowercase; underscores
 and spaces removed) as a **whole**, so ``c r 1`` and ``c_r_1`` map to ``cR1``. If the whole segment
 does not match, the segment is split on whitespace and each piece is normalized (so ``R0 cR1`` in one
 segment still works). Separate parameters should use commas when names contain spaces, e.g.
-``R0, c r 1, a1``. Resolved lists use canonical simulation keys (see ``optimize_brb_mse._row_to_sim_params``).
+``R0, c r 1, a1``. Resolved lists use canonical names matching ``params_to_optimize.SIM_PARAMS_FROM_ROW``.
+Allowed tokens depend on ``steel_model`` (``steelmpf`` vs ``steel4``) for that ``set_id``.
 """
 from __future__ import annotations
 
 import re
 from collections.abc import Callable
+from pathlib import Path
 
 import pandas as pd
 
@@ -19,9 +21,15 @@ from calibrate.calibration_loss_settings import (
     DEFAULT_CALIBRATION_LOSS_SETTINGS,
     calibration_loss_settings_from_partial_dict,
 )
-from calibrate.calibration_paths import SET_ID_SETTINGS_CSV
+from calibrate.steel_model import (
+    STEEL4_ISO_KEYS,
+    STEEL_MODEL_STEEL4,
+    STEEL_MODEL_STEELMPF,
+    STEELMPF_ISO_KEYS,
+    normalize_steel_model,
+)
 
-# Keys accepted in optimize_params cells (subset of SteelMPF / geometry passed to run_simulation).
+# Keys accepted in optimize_params cells (union over models; filtered per ``steel_model``).
 OPTIMIZABLE_SIM_PARAM_NAMES: frozenset[str] = frozenset(
     (
         "L_T",
@@ -40,8 +48,22 @@ OPTIMIZABLE_SIM_PARAM_NAMES: frozenset[str] = frozenset(
         "a2",
         "a3",
         "a4",
+        "fup_ratio",
+        "fun_ratio",
+        "Ru0",
+        *STEEL4_ISO_KEYS,
     )
 )
+
+
+def optimizable_names_for_steel_model(steel_model: object) -> frozenset[str]:
+    """Parameters allowed in ``optimize_params`` for this ``steel_model`` row."""
+    sm = normalize_steel_model(steel_model)
+    if sm == STEEL_MODEL_STEELMPF:
+        return OPTIMIZABLE_SIM_PARAM_NAMES - frozenset(STEEL4_ISO_KEYS)
+    if sm == STEEL_MODEL_STEEL4:
+        return OPTIMIZABLE_SIM_PARAM_NAMES - frozenset(STEELMPF_ISO_KEYS)
+    raise ValueError(f"unexpected steel_model {steel_model!r}")
 
 
 def _normalize_optimize_token_key(token: str) -> str:
@@ -84,7 +106,9 @@ def _canonical_list_from_segment(segment: str) -> tuple[list[str], list[str]]:
     return out, bad
 
 
-def _parse_optimize_params_cell(raw: object, *, path: Path, set_id: int) -> list[str]:
+def _parse_optimize_params_cell(
+    raw: object, *, path: Path, set_id: int, steel_model: str = STEEL_MODEL_STEELMPF
+) -> list[str]:
     """Split on commas; per segment, normalize whole string or whitespace-separated pieces."""
     if raw is None or (isinstance(raw, float) and pd.isna(raw)):
         raise ValueError(f"{path}: set_id={set_id}: empty optimize_params")
@@ -114,6 +138,14 @@ def _parse_optimize_params_cell(raw: object, *, path: Path, set_id: int) -> list
         if c not in seen:
             seen.add(c)
             out.append(c)
+    sm = normalize_steel_model(steel_model)
+    allowed = optimizable_names_for_steel_model(sm)
+    disallowed = [c for c in out if c not in allowed]
+    if disallowed:
+        raise ValueError(
+            f"{path}: set_id={set_id} steel_model={sm!r}: parameter(s) {disallowed} not allowed "
+            f"for this material; allowed: {sorted(allowed)}"
+        )
     return out
 
 
@@ -178,15 +210,18 @@ def build_param_cols_by_set_id_from_mapping(
 
 
 def unique_weighted_train_set_ids(
-    params_df: pd.DataFrame, weight_fn: Callable[[str], float]
+    params_df: pd.DataFrame,
+    weight_fn: Callable[[str], float],
+    *,
+    set_id_column: str = "set_id",
 ) -> list[int]:
-    """Distinct numeric ``set_id`` among rows with positive ``weight_fn(Name)``."""
-    if "set_id" not in params_df.columns:
+    """Distinct numeric ids in ``set_id_column`` among rows with positive ``weight_fn(Name)``."""
+    if set_id_column not in params_df.columns:
         return []
     w_series = params_df["Name"].astype(str).map(weight_fn)
     train = params_df.loc[w_series > 0.0]
     out: set[int] = set()
-    for s in train["set_id"].unique():
+    for s in train[set_id_column].unique():
         if pd.isna(s):
             continue
         try:
@@ -237,8 +272,8 @@ def assert_global_optimize_params_consistent(
     if len(uniq) > 1:
         pretty = {str(k): list(v) for k, v in sorted(resolved.items())}
         raise SystemExit(
-            "Global (pooled) mode requires identical optimize_params for every training set_id "
-            f"when {SET_ID_SETTINGS_CSV.name} is present; resolved lists differ: {pretty}"
+            "Global (pooled) mode requires identical optimize_params for every training cohort id "
+            f"when a generalized settings CSV is present; resolved lists differ: {pretty}"
         )
     return list(next(iter(uniq))) if uniq else list(default)
 
@@ -266,7 +301,40 @@ def assert_global_loss_settings_consistent(
     if len(uniq) > 1:
         pretty = {str(k): v for k, v in sorted(resolved.items())}
         raise SystemExit(
-            "Global (pooled) mode requires identical loss settings for every training set_id "
-            f"when {SET_ID_SETTINGS_CSV.name} is present; resolved settings differ: {pretty}"
+            "Global (pooled) mode requires identical loss settings for every training cohort id "
+            f"when a generalized settings CSV is present; resolved settings differ: {pretty}"
         )
     return next(iter(uniq)) if uniq else default
+
+
+def assert_global_steel_model_consistent(
+    steel_model_by_set_id: dict[int, str],
+    train_set_ids: list[object],
+) -> str:
+    """
+    For pooled / global mode: every training ``set_id`` must use the same ``steel_model``.
+
+    Returns the common model (or ``steelmpf`` when mapping or train list is empty).
+    """
+    if not steel_model_by_set_id or not train_set_ids:
+        return STEEL_MODEL_STEELMPF
+    resolved: dict[int, str] = {}
+    for sid_raw in set(train_set_ids):
+        try:
+            sid = int(pd.to_numeric(sid_raw, errors="raise"))
+        except (ValueError, TypeError):
+            continue
+        if sid not in steel_model_by_set_id:
+            raise SystemExit(
+                f"Global (pooled) mode: cohort id={sid} missing from generalized settings steel_model map "
+                f"(have cohort ids {sorted(steel_model_by_set_id.keys())})"
+            )
+        resolved[sid] = steel_model_by_set_id[sid]
+    uniq = set(resolved.values())
+    if len(uniq) > 1:
+        pretty = {str(k): v for k, v in sorted(resolved.items())}
+        raise SystemExit(
+            "Global (pooled) mode requires the same steel_model for every training cohort id when "
+            f"a generalized settings CSV is present; got: {pretty}"
+        )
+    return next(iter(uniq)) if uniq else STEEL_MODEL_STEELMPF

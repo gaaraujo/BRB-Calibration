@@ -2,8 +2,8 @@
 Per-specimen flags and weights from ``BRB-Specimens.csv``.
 
 - ``individual_optimize`` -- eligibility for ``optimize_brb_mse`` (with resampled data).
-- ``averaged_weight`` / ``generalized_weight`` -- non-negative. **Unordered** digitized rows (``digitized`` +
-  ``path_ordered=false``) always have effective averaged/generalized weight **0**. Path-ordered rows use the
+- ``generalized_weight`` -- non-negative. **Unordered** digitized rows (``digitized`` +
+  ``path_ordered=false``) always have effective generalized weight **0**. Path-ordered rows use the
   CSV values; missing cells default to **1.0**.
 """
 from __future__ import annotations
@@ -14,7 +14,6 @@ from typing import Callable
 import pandas as pd
 
 from specimen_catalog import (  # noqa: E402
-    AVERAGED_WEIGHT_COL,
     GENERALIZED_WEIGHT_COL,
     INDIVIDUAL_OPTIMIZE_COL,
     _parse_bool_cell,
@@ -22,21 +21,6 @@ from specimen_catalog import (  # noqa: E402
     read_catalog,
     uses_unordered_inputs,
 )
-
-
-def _effective_averaged_weight_from_row(row: pd.Series, cat: pd.DataFrame) -> float:
-    """Catalog averaged weight; zero for unordered digitized specimens."""
-    name = str(row["Name"]).strip()
-    rec = get_specimen_record(name, cat)
-    if uses_unordered_inputs(rec):
-        return 0.0
-    if AVERAGED_WEIGHT_COL in row.index and pd.notna(row.get(AVERAGED_WEIGHT_COL)):
-        w = float(row[AVERAGED_WEIGHT_COL])
-    else:
-        w = 1.0
-    if not math.isfinite(w) or w < 0.0:
-        raise ValueError(f"Invalid averaged_weight for {name!r}: {w}")
-    return w
 
 
 def _effective_generalized_weight_from_row(row: pd.Series, cat: pd.DataFrame) -> float:
@@ -54,44 +38,21 @@ def _effective_generalized_weight_from_row(row: pd.Series, cat: pd.DataFrame) ->
     return w
 
 
-def _weight_map_from_catalog(cat: pd.DataFrame, *, generalized: bool) -> dict[str, float]:
-    """``Name`` -> weight for averaged or generalized use."""
-    fn = _effective_generalized_weight_from_row if generalized else _effective_averaged_weight_from_row
-    return {str(r["Name"]).strip(): fn(r, cat) for _, r in cat.iterrows()}
-
-
-def make_averaged_weight_fn(catalog: pd.DataFrame | None = None) -> Callable[[str], float]:
-    """``Name`` -> non-negative weight for **averaged** mean of parameters."""
-    cat = catalog if catalog is not None else read_catalog()
-    m = _weight_map_from_catalog(cat, generalized=False)
-
-    def fn(name: str) -> float:
-        """Return averaged weight for ``name``."""
-        return float(m.get(str(name).strip(), 0.0))
-
-    return fn
+def _generalized_weight_map_from_catalog(cat: pd.DataFrame) -> dict[str, float]:
+    """``Name`` -> weight for generalized optimization."""
+    return {str(r["Name"]).strip(): _effective_generalized_weight_from_row(r, cat) for _, r in cat.iterrows()}
 
 
 def make_generalized_weight_fn(catalog: pd.DataFrame | None = None) -> Callable[[str], float]:
     """``Name`` -> non-negative weight for **generalized** optimization objective."""
     cat = catalog if catalog is not None else read_catalog()
-    m = _weight_map_from_catalog(cat, generalized=True)
+    m = _generalized_weight_map_from_catalog(cat)
 
     def fn(name: str) -> float:
         """Return generalized weight for ``name``."""
         return float(m.get(str(name).strip(), 0.0))
 
     return fn
-
-
-def make_weight_fn(catalog: pd.DataFrame | None = None) -> Callable[[str], float]:
-    """Deprecated alias: same as ``make_averaged_weight_fn``."""
-    return make_averaged_weight_fn(catalog)
-
-
-def weight_for_name(name: str) -> float:
-    """Resolved averaged weight for ``Name`` (uses current catalog)."""
-    return make_averaged_weight_fn()(name)
 
 
 def names_for_individual_optimize(catalog: pd.DataFrame | None = None) -> frozenset[str]:

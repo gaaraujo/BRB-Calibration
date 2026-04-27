@@ -22,8 +22,9 @@ import pandas as pd
 from calibrate.deformation_history_drive import (
     DEFAULT_RDP_EPSILON_IN,
     prepare_deformation_drive,
-    prepend_zero_deformation,
+    prepend_lead_deformation,
 )
+from calibrate.resample_experiment import d_sampling_from_brace_params
 from calibrate.digitized_unordered_bn import compute_envelope_bn_unordered
 
 _POST = Path(__file__).resolve().parent.parent / "postprocess"
@@ -364,8 +365,8 @@ def load_digitized_unordered_series(
     that column (postprocess segment resample; no RDP/prepend here).
 
     Otherwise loads raw ``deformation_history.csv``. When ``prepare_drive`` is True, applies
-    ``prepare_deformation_drive`` (median/RDP/uniform |Du|, zero prepended). When False, prepends
-    zero to raw samples only.
+    ``prepare_deformation_drive`` (median/RDP/uniform |Du|, lead sample prepended). When False, prepends
+    ``0.1 * D_\mathrm{sample}`` to raw samples only.
 
     ``u_unordered`` / ``F_unordered`` always come from raw ``force_deformation.csv`` (unordered F–u samples).
     """
@@ -396,7 +397,7 @@ def load_digitized_unordered_series(
     if use_pipeline_resampled_drive:
         warnings.warn(
             f"{specimen_id}: no pipeline resampled deformation_history at {dh_res}; "
-            "falling back to raw drive + prepare_deformation_drive / prepend.",
+            "falling back to raw drive + prepare_deformation_drive / lead prepend.",
             UserWarning,
             stacklevel=2,
         )
@@ -423,7 +424,22 @@ def load_digitized_unordered_series(
             u_fallback=D_raw,
         )
     else:
-        D_drive = prepend_zero_deformation(D_raw)
+        if drive_d_sampling_in is not None and float(drive_d_sampling_in) > 0.0:
+            d_sp = float(drive_d_sampling_in)
+        elif brace is not None:
+            d_sp = d_sampling_from_brace_params(
+                fyp_ksi=float(brace["fyp_ksi"]),
+                L_T_in=float(brace["L_T_in"]),
+                L_y_in=float(brace["L_y_in"]),
+                A_sc_in2=float(brace["A_c_in2"]),
+                A_t_in2=float(brace["A_t_in2"]),
+                E_ksi=float(brace["E_ksi"]),
+                u_fallback=D_raw,
+            )
+        else:
+            umax = float(np.nanmax(np.abs(D_raw)))
+            d_sp = umax / 100.0 if umax > 0 else 1e-6
+        D_drive = prepend_lead_deformation(D_raw, d_sp)
 
     return D_drive, u_c, F_c
 

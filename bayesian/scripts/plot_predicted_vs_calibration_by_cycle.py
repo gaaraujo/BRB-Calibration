@@ -23,13 +23,19 @@ import numpy as np
 import pandas as pd
 
 _ROOT = Path(__file__).resolve().parent.parent
+_REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
+_pp = _REPO_ROOT / "scripts" / "postprocess"
+if str(_pp) not in sys.path:
+    sys.path.insert(0, str(_pp))
 
 from model import run_analysis
 
 from lib.landmark_vector import load_cycle_meta_json
 from lib.specimen_config import load_specimen_config, resolve_path
+
+from plot_dimensions import LINEWIDTH_HYSTERESIS_OVERLAY_EXPERIMENTAL
 
 COLOR_EXPERIMENTAL = "#B0B0B0"
 COLOR_SIMULATED = "#001F3F"
@@ -38,7 +44,8 @@ COLOR_GAP_POS = "#D62728"
 COLOR_GAP_NEG = "#1F77B4"
 HATCH_GAP = '||||'
 FILL_GAP_ALPHA = 0.35
-LINEWIDTH = 0.9
+LINEWIDTH = LINEWIDTH_HYSTERESIS_OVERLAY_EXPERIMENTAL
+SPINE_LINEWIDTH = 0.6
 SAVE_DPI = 300
 PANEL_W_IN = 2.35
 PANEL_H_IN = 2.05
@@ -280,13 +287,13 @@ def main() -> None:
                 legend_labels = (ln_e.get_label(), ln_p.get_label())
 
             ax.xaxis.set_major_formatter(fmt_pct)
-            ax.axhline(0, color="k", linewidth=0.5)
-            ax.axvline(0, color="k", linewidth=0.5)
+            ax.axhline(0, color="k", linewidth=SPINE_LINEWIDTH)
+            ax.axvline(0, color="k", linewidth=SPINE_LINEWIDTH)
             ax.set_title(f"Cycle {i}", fontsize=TEXT_PT, pad=2)
             ax.tick_params(axis="both", which="both", direction="in", labelsize=TEXT_PT)
 
             for spine in ax.spines.values():
-                spine.set_linewidth(0.6)
+                spine.set_linewidth(SPINE_LINEWIDTH)
 
         for j in range(n_cycles, len(flat)):
             flat[j].set_visible(False)

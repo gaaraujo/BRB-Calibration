@@ -26,6 +26,8 @@ _SCRIPTS = PROJECT_ROOT / "scripts"
 sys.path.insert(0, str(_SCRIPTS))
 sys.path.insert(0, str(SCRIPT_DIR))
 
+from calibrate.calibration_paths import INITIAL_BRB_PARAMETERS_PATH  # noqa: E402
+from calibrate.deformation_history_drive import PREPEND_LEAD_FRAC  # noqa: E402
 from calibrate.resample_experiment import (  # noqa: E402
     DEF_COL,
     FORCE_COL,
@@ -50,16 +52,19 @@ from specimen_catalog import (  # noqa: E402
 
 import matplotlib.pyplot as plt  # noqa: E402
 from plot_dimensions import (  # noqa: E402
+    AXES_SPINE_LINEWIDTH_SINGLE_AX,
     COLOR_EXPERIMENTAL,
-    LEGEND_FONT_SIZE_SMALL_PT,
+    HYSTERESIS_LINEWIDTH_SCALE,
+    LEGEND_FONT_SIZE_SINGLE_AX_PT,
     SAVE_DPI,
     SINGLE_FIGSIZE_IN,
     configure_matplotlib_style,
+    single_axis_style_context,
+    style_single_axis_spines,
 )
 from plot_specimens import (  # noqa: E402
     NORM_FORCE_LABEL,
     NORM_STRAIN_LABEL,
-    _set_axes_frame,
     apply_normalized_fu_axes,
     scatter_characteristic_points_physical,
     set_symmetric_axes,
@@ -69,9 +74,6 @@ FILTERED_DIR = PROJECT_ROOT / "data" / "filtered"
 RESAMPLED_DIR = PROJECT_ROOT / "data" / "resampled"
 CYCLE_POINTS_RESAMPLED_DIR = PROJECT_ROOT / "data" / "cycle_points_resampled"
 CATALOG_PATH = PROJECT_ROOT / "config" / "calibration" / "BRB-Specimens.csv"
-INITIAL_PARAMS_PATH = (
-    PROJECT_ROOT / "results" / "calibration" / "individual_optimize" / "initial_brb_parameters.csv"
-)
 PLOTS_DIR = (
     PROJECT_ROOT
     / "results"
@@ -81,6 +83,17 @@ PLOTS_DIR = (
     / "resampled_and_filtered"
 )
 DEFAULT_E_KSI = 29000.0
+
+
+def _lead_replace_first_zero_deformation(u: np.ndarray, d_samp: float) -> np.ndarray:
+    """If the first sample is ~0 in, set it to ``PREPEND_LEAD_FRAC * d_samp`` (SteelMPF workaround)."""
+    u = np.asarray(u, dtype=float).copy()
+    if u.size == 0:
+        return u
+    if np.isclose(u[0], 0.0, rtol=0.0, atol=1e-12):
+        u[0] = float(PREPEND_LEAD_FRAC) * float(d_samp)
+    return u
+
 
 plt.rcParams["figure.facecolor"] = "white"
 plt.rcParams["axes.facecolor"] = "white"
@@ -120,56 +133,57 @@ def _plot_overlay(
     F_f = df_f[FORCE_COL].to_numpy(dtype=float) / fyA
     u_r = df_r[DEF_COL].to_numpy(dtype=float) / L_y
     F_r = df_r[FORCE_COL].to_numpy(dtype=float) / fyA
-    fig, ax = plt.subplots(figsize=SINGLE_FIGSIZE_IN, layout="constrained")
-    ax.plot(
-        u_f,
-        F_f,
-        color="tab:orange",
-        linewidth=0.9,
-        label="Filtered",
-        alpha=0.85,
-    )
-    ax.plot(
-        u_r,
-        F_r,
-        color=COLOR_EXPERIMENTAL,
-        linewidth=0.7,
-        label="Resampled",
-        alpha=0.9,
-    )
-    df_r_n = df_r.assign(
-        _u_norm=df_r[DEF_COL].to_numpy(dtype=float) / L_y,
-        _F_norm=df_r[FORCE_COL].to_numpy(dtype=float) / fyA,
-    )
-    scatter_characteristic_points_physical(
-        ax,
-        df_r_n,
-        resampled_points,
-        def_col="_u_norm",
-        force_col="_F_norm",
-    )
-    x_all = np.concatenate([u_f, u_r])
-    y_all = np.concatenate([F_f, F_r])
-    set_symmetric_axes(ax, x_all, y_all)
-    ax.set_xlabel(NORM_STRAIN_LABEL)
-    ax.set_ylabel(NORM_FORCE_LABEL)
-    apply_normalized_fu_axes(ax)
-    h, lab = ax.get_legend_handles_labels()
-    fig.legend(
-        h,
-        lab,
-        loc="outside upper center",
-        ncol=3,
-        fontsize=LEGEND_FONT_SIZE_SMALL_PT,
-        frameon=False,
-    )
-    ax.grid(True, alpha=0.3)
-    ax.axhline(0, color="k", linewidth=0.4)
-    ax.axvline(0, color="k", linewidth=0.4)
-    _set_axes_frame(ax)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(out_path, dpi=SAVE_DPI)
-    plt.close(fig)
+    with single_axis_style_context():
+        fig, ax = plt.subplots(figsize=SINGLE_FIGSIZE_IN, layout="constrained")
+        ax.plot(
+            u_f,
+            F_f,
+            color="tab:orange",
+            linewidth=0.9 * HYSTERESIS_LINEWIDTH_SCALE,
+            label="Filtered",
+            alpha=0.85,
+        )
+        ax.plot(
+            u_r,
+            F_r,
+            color=COLOR_EXPERIMENTAL,
+            linewidth=0.7 * HYSTERESIS_LINEWIDTH_SCALE,
+            label="Resampled",
+            alpha=0.9,
+        )
+        df_r_n = df_r.assign(
+            _u_norm=df_r[DEF_COL].to_numpy(dtype=float) / L_y,
+            _F_norm=df_r[FORCE_COL].to_numpy(dtype=float) / fyA,
+        )
+        scatter_characteristic_points_physical(
+            ax,
+            df_r_n,
+            resampled_points,
+            def_col="_u_norm",
+            force_col="_F_norm",
+        )
+        x_all = np.concatenate([u_f, u_r])
+        y_all = np.concatenate([F_f, F_r])
+        set_symmetric_axes(ax, x_all, y_all)
+        ax.set_xlabel(NORM_STRAIN_LABEL)
+        ax.set_ylabel(NORM_FORCE_LABEL)
+        apply_normalized_fu_axes(ax)
+        h, lab = ax.get_legend_handles_labels()
+        fig.legend(
+            h,
+            lab,
+            loc="outside upper center",
+            ncol=3,
+            fontsize=LEGEND_FONT_SIZE_SINGLE_AX_PT,
+            frameon=False,
+        )
+        ax.grid(True, alpha=0.3)
+        ax.axhline(0, color="k", linewidth=AXES_SPINE_LINEWIDTH_SINGLE_AX)
+        ax.axvline(0, color="k", linewidth=AXES_SPINE_LINEWIDTH_SINGLE_AX)
+        style_single_axis_spines(ax)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(out_path, dpi=SAVE_DPI)
+        plt.close(fig)
 
 
 def _filtered_specimen_names(catalog_by_name: pd.DataFrame) -> list[str]:
@@ -255,6 +269,9 @@ def process_specimen(
     d_samp = float(max(d_samp, 1e-15))
 
     out_df, remap = resample_by_segments(df, boundary_indices, d_samp)
+    u_lead = _lead_replace_first_zero_deformation(out_df[DEF_COL].to_numpy(), d_samp)
+    out_df = out_df.copy()
+    out_df[DEF_COL] = u_lead
     new_points = remap_cycle_points(points, remap, out_df)
 
     rdir = RESAMPLED_DIR / name
@@ -354,6 +371,9 @@ def process_specimen_digitized_unordered(
     d_samp = float(max(d_samp, 1e-15))
 
     out_df, remap = resample_by_segments(df, boundary_indices, d_samp)
+    u_lead = _lead_replace_first_zero_deformation(out_df[DEF_COL].to_numpy(), d_samp)
+    out_df = out_df.copy()
+    out_df[DEF_COL] = u_lead
     new_points = remap_cycle_points(points, remap, out_df)
 
     rdir = RESAMPLED_DIR / name
@@ -385,12 +405,12 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    catalog = pd.read_csv(CATALOG_PATH)
+    catalog = read_catalog(CATALOG_PATH)
     catalog_by_name = catalog.set_index("Name")
 
     initial_df = None
-    if INITIAL_PARAMS_PATH.exists():
-        initial_df = pd.read_csv(INITIAL_PARAMS_PATH)
+    if INITIAL_BRB_PARAMETERS_PATH.exists():
+        initial_df = pd.read_csv(INITIAL_BRB_PARAMETERS_PATH)
     e_by_name = _e_ksi_by_name(initial_df)
 
     names = _filtered_specimen_names(catalog_by_name)

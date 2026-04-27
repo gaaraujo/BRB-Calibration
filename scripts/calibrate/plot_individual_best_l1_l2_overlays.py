@@ -6,8 +6,9 @@ Plot per-specimen overlays for the *best* individual-optimization L2 and L1 fits
 
 Best set selection:
 - Read ``results/calibration/individual_optimize/optimized_brb_parameters_metrics.csv``.
-- For each specimen with ``individual_optimize=true`` and ``success=true`` (excluding CB225),
-  pick:
+- Map each ``set_id`` to ``steel_model`` using ``optimized_brb_parameters.csv``.
+- For each ``steel_model`` and each specimen with ``individual_optimize=true`` and ``success=true`` (excluding CB225),
+  pick **within that model**:
   - best L2: minimum ``final_J_total`` among rows with any L2 weight > 0
   - best L1: minimum ``final_J_total`` among rows with any L1 weight > 0
 
@@ -15,9 +16,10 @@ Numerical histories are read from:
 ``results/calibration/individual_optimize/optimized_brb_parameters_simulated_force/{Name}_set{k}_simulated.csv``
 
 Outputs:
-- One PNG per specimen: ``{Name}_bestL2_bestL1_force_def_norm.png``
-- One combined grid: ``all_bestL2_bestL1_force_def_norm.png``
-saved under ``results/plots/calibration/individual_optimize/overlays_best_l1_l2/`` by default.
+- Under ``.../overlays_best_l1_l2/<steel_model>/`` (e.g. ``steelmpf/``, ``steel4/``): one PNG per specimen
+  ``{Name}_bestL2_bestL1_force_def_norm.png`` and combined ``all_bestL2_bestL1_force_def_norm.png``.
+- Best L1/L2 ``set_id`` are chosen **within** each ``steel_model`` (from ``optimized_brb_parameters.csv`` via ``set_id``).
+- Combined metrics CSV at ``overlays_best_l1_l2/bestL2_bestL1_metrics_table.csv`` includes a ``steel_model`` column.
 """
 
 from __future__ import annotations
@@ -44,15 +46,25 @@ from calibrate.calibration_paths import (  # noqa: E402
     PLOTS_INDIVIDUAL_OPTIMIZE,
     SET_ID_SETTINGS_CSV,
 )
+from calibrate.set_id_settings import read_set_id_settings_table  # noqa: E402
+from calibrate.steel_model import (  # noqa: E402
+    STEEL4_ISO_KEYS,
+    STEEL_MODEL_STEEL4,
+    normalize_steel_model,
+    ordered_steel_model_subdirs,
+)
 from postprocess.plot_dimensions import (  # noqa: E402
     COLOR_NUMERICAL_COHORT,
     COLOR_NUMERICAL_COHORT_AUX,
+    HYSTERESIS_LINEWIDTH_SCALE_OVERLAYS,
+    AXES_SPINE_LINEWIDTH,
     LEGEND_FONT_SIZE_SMALL_PT,
+    OVERLAY_GRID_TICK_LENGTH_SCALE,
     PLOT_FONT_SIZE_GRID_MONTAGE_PT,
     SAVE_DPI,
     configure_matplotlib_style,
     figsize_for_grid,
-    grid_montage_rcparams,
+    overlay_grid_montage_rcparams,
     style_axes_spines_and_ticks,
 )
 from postprocess.plot_specimens import (  # noqa: E402
@@ -82,15 +94,17 @@ COLOR_L2 = COLOR_NUMERICAL_COHORT
 COLOR_L1 = COLOR_NUMERICAL_COHORT_AUX
 LW_EXP = 0.9 * 1.5
 LW_NUM = 0.9
+LW_FU_EXP = LW_EXP * HYSTERESIS_LINEWIDTH_SCALE_OVERLAYS
+LW_FU_NUM = LW_NUM * HYSTERESIS_LINEWIDTH_SCALE_OVERLAYS
 
 
 def _best_l1_l2_overlay_legend_handles() -> tuple[list[plt.Line2D], list[str]]:
     """Experimental + best L1/L2 line handles (colors match ``_plot_one_specimen_norm`` / force / stiffness panels)."""
     return (
         [
-            plt.Line2D([0], [0], color=EXPERIMENTAL_GREY, linestyle="-", linewidth=LW_EXP),
-            plt.Line2D([0], [0], color=COLOR_L1, linestyle="--", linewidth=LW_NUM),
-            plt.Line2D([0], [0], color=COLOR_L2, linestyle="--", linewidth=LW_NUM),
+            plt.Line2D([0], [0], color=EXPERIMENTAL_GREY, linestyle="-", linewidth=LW_FU_EXP),
+            plt.Line2D([0], [0], color=COLOR_L1, linestyle="--", linewidth=LW_FU_NUM),
+            plt.Line2D([0], [0], color=COLOR_L2, linestyle="--", linewidth=LW_FU_NUM),
         ],
         ["Experimental", r"Best $L_1$", r"Best $L_2$"],
     )
@@ -188,9 +202,33 @@ def _has_any_weight(row: pd.Series, cols: list[str]) -> bool:
     return False
 
 
-def _pick_best_set_ids(metrics_df: pd.DataFrame) -> dict[str, dict[str, int]]:
+def _set_id_to_steel_model(params_df: pd.DataFrame) -> dict[int, str]:
+    """Map ``set_id`` -> normalized ``steel_model`` from optimized parameters CSV."""
+    if "set_id" not in params_df.columns:
+        return {}
+    df = params_df.copy()
+    df["_sid"] = pd.to_numeric(df["set_id"], errors="coerce")
+    df = df[np.isfinite(df["_sid"])]
+    out: dict[int, str] = {}
+    for sid, g in df.groupby("_sid"):
+        sm = (
+            normalize_steel_model(g.iloc[0].get("steel_model"))
+            if "steel_model" in g.columns
+            else normalize_steel_model(None)
+        )
+        out[int(sid)] = sm
+    return out
+
+
+def _models_in_order(models: set[str]) -> list[str]:
+    return ordered_steel_model_subdirs(models)
+
+
+def _pick_best_set_ids(metrics_df: pd.DataFrame, *, steel_model: str | None = None) -> dict[str, dict[str, int]]:
     """
-    Returns: {Name: {"L2": set_id, "L1": set_id}}
+    Returns: {Name: {"L2": set_id, "L1": set_id}}.
+
+    If ``steel_model`` is set, restrict to rows whose ``steel_model`` column matches (after normalization).
     """
     required = {"Name", "set_id", "success", "individual_optimize", "final_J_total"}
     missing = sorted(required - set(metrics_df.columns))
@@ -209,6 +247,14 @@ def _pick_best_set_ids(metrics_df: pd.DataFrame) -> dict[str, dict[str, int]]:
     df["set_id_num"] = pd.to_numeric(df["set_id"], errors="coerce")
     df["J"] = pd.to_numeric(df["final_J_total"], errors="coerce")
     df = df[np.isfinite(df["set_id_num"]) & np.isfinite(df["J"])]
+    if steel_model is not None:
+        sm = normalize_steel_model(steel_model)
+        if "steel_model" not in df.columns:
+            raise RuntimeError(
+                "plot_individual_best_l1_l2_overlays: expected merged ``steel_model`` on metrics "
+                "(from parameters CSV by set_id)."
+            )
+        df = df[df["steel_model"].astype(str).str.strip().str.lower() == sm]
 
     for name, g in df.groupby("Name"):
         best: dict[str, int] = {}
@@ -413,7 +459,7 @@ def _plot_force_history_panel(
         ax.set_ylim(-yh, yh)
         ax.set_yticks([-yh, 0.0, yh])
     ax.grid(True, alpha=0.25)
-    ax.axhline(0, color="k", linewidth=0.4)
+    ax.axhline(0, color="k", linewidth=AXES_SPINE_LINEWIDTH)
     style_axes_spines_and_ticks(ax)
     return True
 
@@ -631,7 +677,7 @@ def _plot_tangent_stiffness_panel(
     ax.set_ylim(ylo, yhi)
     ax.set_yticks(list(STIFFNESS_HISTORY_Y_TICKS) if y_ticks is None else list(y_ticks))
     ax.grid(True, alpha=0.25)
-    ax.axhline(0, color="k", linewidth=0.4)
+    ax.axhline(0, color="k", linewidth=AXES_SPINE_LINEWIDTH)
     style_axes_spines_and_ticks(ax)
     return True
 
@@ -699,7 +745,7 @@ def _plot_one_specimen_norm(
         F_exp_n,
         color=EXPERIMENTAL_GREY,
         alpha=0.95,
-        linewidth=LW_EXP,
+        linewidth=LW_FU_EXP,
         linestyle="-",
         zorder=1,
     )
@@ -708,7 +754,7 @@ def _plot_one_specimen_norm(
         F_l1_n,
         color=COLOR_L1,
         alpha=0.95,
-        linewidth=LW_NUM,
+        linewidth=LW_FU_NUM,
         linestyle="--",
         zorder=3,
     )
@@ -717,7 +763,7 @@ def _plot_one_specimen_norm(
         F_l2_n,
         color=COLOR_L2,
         alpha=0.95,
-        linewidth=LW_NUM,
+        linewidth=LW_FU_NUM,
         linestyle="--",
         zorder=4,
     )
@@ -741,75 +787,24 @@ def _plot_one_specimen_norm(
     ax.xaxis.labelpad = 10.0
     ax.yaxis.labelpad = 12.0
     ax.grid(True, alpha=0.3)
-    ax.axhline(0, color="k", linewidth=0.4)
-    ax.axvline(0, color="k", linewidth=0.4)
+    ax.axhline(0, color="k", linewidth=AXES_SPINE_LINEWIDTH)
+    ax.axvline(0, color="k", linewidth=AXES_SPINE_LINEWIDTH)
     style_axes_spines_and_ticks(ax)
     return True
 
 
-def main() -> None:
-    p = argparse.ArgumentParser(
-        description="Plot experimental (grey) + best L2 + best L1 overlays for individual-optimize training specimens (excluding CB225).",
-    )
-    p.add_argument(
-        "--output-dir",
-        type=str,
-        default=str(PLOTS_INDIVIDUAL_OPTIMIZE / "overlays_best_l1_l2"),
-        help="Output directory for PNGs (default: results/plots/calibration/individual_optimize/overlays_best_l1_l2).",
-    )
-    p.add_argument(
-        "--metrics-csv",
-        type=str,
-        default=str(METRICS_CSV),
-        help="Path to optimized_brb_parameters_metrics.csv (default: repo results path).",
-    )
-    p.add_argument(
-        "--params-csv",
-        type=str,
-        default=str(OPTIMIZED_BRB_PARAMETERS_PATH),
-        help="Path to optimized_brb_parameters.csv (default: repo results path).",
-    )
-    p.add_argument(
-        "--simulated-force-dir",
-        type=str,
-        default=str(INDIVIDUAL_SIMULATED_FORCE_DIR),
-        help="Directory containing {Name}_set{k}_simulated.csv (default: repo results path).",
-    )
-    p.add_argument(
-        "--specimen",
-        type=str,
-        default=None,
-        help="If set, only plot this specimen name (still requires it to be in metrics and not CB225).",
-    )
-    args = p.parse_args()
-
-    out_dir = Path(args.output_dir).expanduser().resolve()
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    metrics_csv = Path(args.metrics_csv).expanduser().resolve()
-    params_csv = Path(args.params_csv).expanduser().resolve()
-    sim_dir = Path(args.simulated_force_dir).expanduser().resolve()
-
-    catalog = read_catalog(BRB_SPECIMENS_CSV)
-    params_df = pd.read_csv(params_csv)
-    metrics_df = pd.read_csv(metrics_csv)
-    set_id_settings_df = pd.read_csv(SET_ID_SETTINGS_CSV, comment="#")
-    if "set_id" not in set_id_settings_df.columns:
-        raise RuntimeError(f"set_id_settings CSV missing 'set_id' column: {SET_ID_SETTINGS_CSV}")
-    set_id_settings_df["set_id"] = pd.to_numeric(set_id_settings_df["set_id"], errors="coerce")
-    set_id_settings_df = set_id_settings_df[np.isfinite(set_id_settings_df["set_id"])].copy()
-    set_id_settings_df["set_id"] = set_id_settings_df["set_id"].astype(int)
-    set_id_settings_by_id = set_id_settings_df.set_index("set_id", drop=True)
-
-    best = _pick_best_set_ids(metrics_df)
-    if args.specimen is not None:
-        s = str(args.specimen).strip()
-        best = {k: v for k, v in best.items() if k == s}
-
-    if not best:
-        print("No specimens found with both best L2 and best L1 selections.")
-        return
-
+def _render_best_l1_l2_overlays_for_model(
+    *,
+    steel_model: str,
+    best: dict[str, dict[str, int]],
+    out_dir: Path,
+    catalog: pd.DataFrame,
+    params_df: pd.DataFrame,
+    metrics_w: pd.DataFrame,
+    sim_dir: Path,
+    set_id_settings_by_id: pd.DataFrame,
+    rows_out_all: list[dict],
+) -> None:
     specimen_names = [n for n in catalog["Name"].astype(str).tolist() if n in best]
     tail = sorted(set(best.keys()) - set(specimen_names))
     specimen_names = specimen_names + tail
@@ -884,7 +879,13 @@ def main() -> None:
         "final_unordered_J_binenv",
         "final_unordered_J_binenv_l1",
     ]
-    param_cols = ["b_p", "b_n", "R0", "cR1", "cR2", "a1", "a2", "a3", "a4"]
+    sm_tab = normalize_steel_model(steel_model)
+    _pcore_shared = ["b_p", "b_n", "R0", "cR1", "cR2", "a1", "a2", "a3", "a4"]
+    _pcore_steelmpf_tail = ["fup_ratio", "fun_ratio", "Ru0"]
+    if sm_tab == STEEL_MODEL_STEEL4:
+        param_cols = [*_pcore_shared, *STEEL4_ISO_KEYS]
+    else:
+        param_cols = [*_pcore_shared, *_pcore_steelmpf_tail]
     rows_out: list[dict] = []
 
     def _bp_bn_source_token_for_set(set_id: int) -> str:
@@ -916,9 +917,10 @@ def main() -> None:
     for name in specimen_names:
         for obj in ("L2", "L1"):
             sid = int(best[name][obj])
-            mrow = _metrics_row_for(metrics_df, name, sid, obj)
+            mrow = _metrics_row_for(metrics_w, name, sid, obj)
             prow = _params_row_for(params_df, name, sid)
             out_row = {
+                "steel_model": steel_model,
                 "Name": name,
                 "set_id": sid,
                 "objective": obj,
@@ -932,16 +934,20 @@ def main() -> None:
                 out_row[c] = float(mrow[c]) if (mrow is not None and c in mrow.index and pd.notna(mrow[c])) else np.nan
             rows_out.append(out_row)
 
-    metrics_table_path = out_dir / "bestL2_bestL1_metrics_table.csv"
-    pd.DataFrame(rows_out).to_csv(metrics_table_path, index=False)
+    rows_out_all.extend(rows_out)
 
     # Per specimen PNGs
+    s_len = OVERLAY_GRID_TICK_LENGTH_SCALE
     per_specimen_rc = {
         "font.size": 18.0,
         "axes.titlesize": 18.0,
         "axes.labelsize": 18.0,
         "xtick.labelsize": 16.0,
         "ytick.labelsize": 16.0,
+        "xtick.major.size": 3.5 * s_len,
+        "ytick.major.size": 3.5 * s_len,
+        "xtick.minor.size": 2.0 * s_len,
+        "ytick.minor.size": 2.0 * s_len,
         "legend.fontsize": max(14.0, float(LEGEND_FONT_SIZE_SMALL_PT) * 2.0 - 2.0),
     }
     for name in specimen_names:
@@ -983,7 +989,7 @@ def main() -> None:
     n = len(specimen_names)
     ncol = 3
     nrow = int(np.ceil(n / ncol))
-    grid_rc = grid_montage_rcparams()
+    grid_rc = overlay_grid_montage_rcparams()
     grid_rc.update(
         {
             "font.size": 17.0,
@@ -1274,7 +1280,111 @@ def main() -> None:
                 fig.savefig(out_dir / png_mid, dpi=EXPORT_DPI, facecolor="white")
                 plt.close(fig)
 
-    print(f"Wrote overlays into {out_dir}")
+
+
+def main() -> None:
+    p = argparse.ArgumentParser(
+        description="Plot experimental (grey) + best L2 + best L1 overlays for individual-optimize training specimens (excluding CB225).",
+    )
+    p.add_argument(
+        "--output-dir",
+        type=str,
+        default=str(PLOTS_INDIVIDUAL_OPTIMIZE / "overlays_best_l1_l2"),
+        help=(
+            "Output root directory (default: results/plots/calibration/individual_optimize/overlays_best_l1_l2). "
+            "PNGs are written under <output-dir>/<steel_model>/."
+        ),
+    )
+    p.add_argument(
+        "--metrics-csv",
+        type=str,
+        default=str(METRICS_CSV),
+        help="Path to optimized_brb_parameters_metrics.csv (default: repo results path).",
+    )
+    p.add_argument(
+        "--params-csv",
+        type=str,
+        default=str(OPTIMIZED_BRB_PARAMETERS_PATH),
+        help="Path to optimized_brb_parameters.csv (default: repo results path).",
+    )
+    p.add_argument(
+        "--simulated-force-dir",
+        type=str,
+        default=str(INDIVIDUAL_SIMULATED_FORCE_DIR),
+        help="Directory containing {Name}_set{k}_simulated.csv (default: repo results path).",
+    )
+    p.add_argument(
+        "--specimen",
+        type=str,
+        default=None,
+        help="If set, only plot this specimen name (still requires it to be in metrics and not CB225).",
+    )
+    args = p.parse_args()
+    root_out = Path(args.output_dir).expanduser().resolve()
+    root_out.mkdir(parents=True, exist_ok=True)
+
+    metrics_csv = Path(args.metrics_csv).expanduser().resolve()
+    params_csv = Path(args.params_csv).expanduser().resolve()
+    sim_dir = Path(args.simulated_force_dir).expanduser().resolve()
+
+    catalog = read_catalog(BRB_SPECIMENS_CSV)
+    params_df = pd.read_csv(params_csv)
+    metrics_df = pd.read_csv(metrics_csv)
+    set_id_settings_df = read_set_id_settings_table()
+    if "set_id" not in set_id_settings_df.columns:
+        raise RuntimeError(f"set_id_settings CSV missing 'set_id' column: {SET_ID_SETTINGS_CSV}")
+    set_id_settings_df["set_id"] = pd.to_numeric(
+        set_id_settings_df["set_id"].astype(str).str.strip(),
+        errors="coerce",
+    )
+    set_id_settings_df = set_id_settings_df[np.isfinite(set_id_settings_df["set_id"])].copy()
+    set_id_settings_df["set_id"] = set_id_settings_df["set_id"].astype(int)
+    set_id_settings_by_id = set_id_settings_df.set_index("set_id", drop=True)
+
+    sid_to_sm = _set_id_to_steel_model(params_df)
+    metrics_w = metrics_df.copy()
+    metrics_w["set_id_num"] = pd.to_numeric(metrics_w["set_id"], errors="coerce")
+    metrics_w["steel_model"] = metrics_w["set_id_num"].apply(
+        lambda x: sid_to_sm.get(int(x), normalize_steel_model(None)) if pd.notna(x) else normalize_steel_model(None)
+    )
+
+    models_here = _models_in_order(set(sid_to_sm.values()) if sid_to_sm else {"steelmpf"})
+    rows_out_all: list[dict] = []
+
+    for steel_model in models_here:
+        best = _pick_best_set_ids(metrics_w, steel_model=steel_model)
+        if args.specimen is not None:
+            s = str(args.specimen).strip()
+            best = {k: v for k, v in best.items() if k == s}
+
+        if not best:
+            print(
+                f"No specimens with both best L2 and best L1 for steel_model={steel_model!r}; skipping."
+            )
+            continue
+
+        out_dir = root_out / steel_model
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        _render_best_l1_l2_overlays_for_model(
+            steel_model=steel_model,
+            best=best,
+            out_dir=out_dir,
+            catalog=catalog,
+            params_df=params_df,
+            metrics_w=metrics_w,
+            sim_dir=sim_dir,
+            set_id_settings_by_id=set_id_settings_by_id,
+            rows_out_all=rows_out_all,
+        )
+
+    if not rows_out_all:
+        print("No overlays written (no steel_model had both best L1 and best L2 for any specimen).")
+        return
+    metrics_table_path = root_out / "bestL2_bestL1_metrics_table.csv"
+    pd.DataFrame(rows_out_all).to_csv(metrics_table_path, index=False)
+    print(f"Wrote overlays into {root_out} (per-model subfolders + combined metrics table)")
+
 
 
 if __name__ == "__main__":

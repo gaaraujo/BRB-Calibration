@@ -180,7 +180,8 @@ def load_calibration_loss_settings(path: Path | None) -> CalibrationLossSettings
     if path is None or not path.is_file():
         return DEFAULT_CALIBRATION_LOSS_SETTINGS
 
-    df = pd.read_csv(path, comment="#")
+    df = pd.read_csv(path, comment="#", skipinitialspace=True)
+    df.columns = df.columns.astype(str).str.strip()
     if df.empty:
         return DEFAULT_CALIBRATION_LOSS_SETTINGS
 

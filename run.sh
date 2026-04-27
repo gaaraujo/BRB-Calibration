@@ -62,10 +62,11 @@ run_pipeline_steps() {
   python scripts/calibrate/plot_b_slopes.py
   # Histograms and geometry scatter for b_n / b_p
   python scripts/calibrate/plot_b_histograms_and_scatter.py
+  # Resampled loops: sig0 / elastic-ray overlays -> results/plots/apparent_b/sig0_slopes/
+  python scripts/calibrate/plot_sig0_slopes.py
 
   # --- Preset sim vs exp overlays (fixed b_p, b_n before L-BFGS; steel from set_id_settings.csv) ---
-  python scripts/calibrate/plot_preset_overlays.py --params results/calibration/individual_optimize/initial_brb_parameters.csv
-  # Alternative: --set-id-settings config/calibration/set_id_settings.csv if you want plot_preset_overlays to rebuild from catalog + settings instead of this CSV :)
+  python scripts/calibrate/plot_preset_overlays.py
 
   # --- SteelMPF calibration and sim vs exp overlays ---
   # SteelMPF calibration: J_feat (+ optional J_E); cycle-weight PNGs under plots/calibration/individual_optimize/cycle_weights/; *_metrics.csv and *_simulated_force/ next to --output.
@@ -73,23 +74,15 @@ run_pipeline_steps() {
   # Sim vs resampled exp overlays (physical + normalized)
   python scripts/calibrate/plot_params_vs_filtered.py --params results/calibration/individual_optimize/optimized_brb_parameters.csv --output-dir overlays
 
-  # --- Averaged-parameter evaluation (metrics CSV + NPZs + hysteresis PNGs) ---
-  # Averaged/generalized weights: BRB-Specimens.csv averaged_weight / generalized_weight (path-ordered only); individual_optimize for per-specimen L-BFGS (see README).
-  python scripts/calibrate/eval_averaged_params.py "${AMP_W_ARGS[@]}" \
-      --params results/calibration/individual_optimize/optimized_brb_parameters.csv \
-      --output-params results/calibration/averaged_optimize/averaged_brb_parameters.csv \
-      --output-metrics results/calibration/averaged_optimize/averaged_params_eval_metrics.csv \
-      --output-plots-dir results/plots/calibration/averaged_optimize/overlays
-
-  # --- Generalized optimization (shared PARAMS_TO_OPTIMIZE) + specimen-set eval --- (same config/calibration/params_limits.csv unless --param-limits)
+  # --- Generalized optimization + specimen-set eval ---
+  # Seeds / optimize_params: config/calibration/set_id_settings_generalized.csv (override: --set-id-settings).
   python scripts/calibrate/optimize_generalized_brb_mse.py "${AMP_W_ARGS[@]}" \
-      --params results/calibration/individual_optimize/optimized_brb_parameters.csv \
       --output-params results/calibration/generalized_optimize/generalized_brb_parameters.csv \
       --output-metrics results/calibration/generalized_optimize/generalized_params_eval_metrics.csv \
       --output-plots-dir results/plots/calibration/generalized_optimize/overlays
 
   # --- Combined normalized overlays: one set{k}_combined_force_def_norm.png per set_id per method ---
-  # Reads numerical-model *_simulated.csv under each method's *simulated_force/ (from optimize_brb_mse / eval above).
+  # Reads numerical-model *_simulated.csv under each method's *simulated_force/ (from optimize_brb_mse / generalized eval).
   python scripts/calibrate/plot_compare_calibration_overlays.py
 
   # --- Generalized overlays with train-weighted mean b_p/b_n (same steel as generalized per set_id) ---
@@ -106,7 +99,7 @@ run_pipeline_steps() {
   # Always --amplitude-weights so *_landmarks_exp.csv w_c matches J_feat (independent of USE_AMPLITUDE_WEIGHTS).
   python scripts/calibrate/plot_cycle_landmarks_debug.py --amplitude-weights --params results/calibration/individual_optimize/optimized_brb_parameters.csv
 
-  # --- Averaged vs generalized narrative report (default: results/calibration/averaged_vs_generalized_metrics_report.md) ---
+  # --- Individual vs generalized narrative report (default: results/calibration/calibration_individual_generalized_report.md) ---
   python scripts/calibrate/report_averaged_vs_generalized_metrics.py
 }
 

@@ -23,9 +23,10 @@ BRB-Specimens.csv: specimen metadata, **where input CSVs live**, and who is in w
 **Catalog columns (see root README table)**
   ``experimental_layout`` -- ``raw`` (lab specimen set) or ``digitized``.
   ``individual_optimize`` -- if true, the specimen may run ``optimize_brb_mse`` when resampled data exist.
-  ``averaged_weight`` / ``generalized_weight`` -- non-negative; for **path-ordered** rows they set contribution
-    to averaged-parameter mean / generalized objective. **Unordered** digitized rows never enter those aggregates (effective
-    weight 0 in ``specimen_weights.py``).
+  ``generalized_weight`` -- non-negative; for **path-ordered** rows it sets contribution to the generalized
+    objective. **Unordered** digitized rows never enter that aggregate (effective weight 0 in ``specimen_weights.py``).
+    Which generalized **configuration** (``set_id`` row in ``set_id_settings_generalized.csv``) applies is defined
+    only in that CSV when running ``optimize_generalized_brb_mse`` (not in this catalog).
   ``path_ordered`` -- if true, ``force_deformation.csv`` is treated as a path series and the specimen
     can enter filter/resample when that file exists. If false with ``digitized``, use
     ``deformation_history.csv`` + ``force_deformation.csv`` as the unordered F-u samples + drive pair.
@@ -63,10 +64,11 @@ from typing import Literal
 import numpy as np
 import pandas as pd
 
-# Catalog columns for optimize + averaged / generalized (see README).
+# Catalog columns for optimize + generalized (see README).
 INDIVIDUAL_OPTIMIZE_COL = "individual_optimize"
-AVERAGED_WEIGHT_COL = "averaged_weight"
 GENERALIZED_WEIGHT_COL = "generalized_weight"
+# Metrics column: which ``set_id`` row from ``set_id_settings_generalized.csv`` produced this eval row.
+GENERALIZED_CONFIG_SET_ID_COL = "generalized_config_set_id"
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = SCRIPT_DIR.parent.parent
@@ -272,17 +274,21 @@ def _parse_bool_cell(x) -> bool:
 def read_catalog(catalog_path: Path | None = None) -> pd.DataFrame:
     """Load ``BRB-Specimens.csv``, default columns, validate ``experimental_layout``."""
     path = catalog_path or CATALOG_PATH
-    df = pd.read_csv(path)
+    # skipinitialspace + stripped headers: spreadsheets often pad headers (e.g. ``Name   ``).
+    df = pd.read_csv(path, skipinitialspace=True)
+    df.columns = df.columns.astype(str).str.strip()
     if "Name" not in df.columns:
         raise ValueError("BRB-Specimens.csv must have Name column")
     df = df.copy()
-    for req in (INDIVIDUAL_OPTIMIZE_COL, AVERAGED_WEIGHT_COL, GENERALIZED_WEIGHT_COL):
+    # Padded ``Name`` cells (e.g. ``PC250  ``) must match folder stems / stripped lookups.
+    df["Name"] = df["Name"].apply(lambda x: str(x).strip() if pd.notna(x) else x)
+    for req in (INDIVIDUAL_OPTIMIZE_COL, GENERALIZED_WEIGHT_COL):
         if req not in df.columns:
             raise ValueError(f"BRB-Specimens.csv must include column {req!r}")
     if "pool_joint_cohort" in df.columns:
         raise ValueError(
             "BRB-Specimens.csv: remove column 'pool_joint_cohort'; "
-            "use 'individual_optimize', 'averaged_weight', and 'generalized_weight'."
+            "use 'individual_optimize' and 'generalized_weight'."
         )
     if "data_mode" in df.columns:
         df = df.drop(columns=["data_mode"])
@@ -303,7 +309,7 @@ def read_catalog(catalog_path: Path | None = None) -> pd.DataFrame:
         lay = str(row["experimental_layout"]).strip()
         if lay not in LAYOUT_VALUES:
             raise ValueError(f"Invalid experimental_layout {lay!r} for {row.get('Name')}")
-        for wcol in (AVERAGED_WEIGHT_COL, GENERALIZED_WEIGHT_COL):
+        for wcol in (GENERALIZED_WEIGHT_COL,):
             v = row.get(wcol)
             if pd.notna(v):
                 w = float(v)
@@ -315,13 +321,14 @@ def read_catalog(catalog_path: Path | None = None) -> pd.DataFrame:
 def get_specimen_record(name: str, catalog: pd.DataFrame | None = None) -> SpecimenRecord:
     """Typed view of one catalog row by Name."""
     cat = catalog if catalog is not None else read_catalog()
-    cat = cat[cat["Name"].astype(str) == str(name)]
+    key = str(name).strip()
+    cat = cat[cat["Name"].astype(str).str.strip() == key]
     if cat.empty:
-        raise KeyError(f"Name {name!r} not in catalog")
+        raise KeyError(f"Name {key!r} not in catalog")
     row = cat.iloc[0]
     lay = _canonical_layout_value(row["experimental_layout"])
     if lay not in LAYOUT_VALUES:
-        raise ValueError(f"Invalid experimental_layout {lay!r} for {name}")
+        raise ValueError(f"Invalid experimental_layout {lay!r} for {key}")
     skip_fr = False
     if "skip_filter_resample" in row.index and pd.notna(row.get("skip_filter_resample")):
         try:
@@ -330,7 +337,7 @@ def get_specimen_record(name: str, catalog: pd.DataFrame | None = None) -> Speci
             skip_fr = False
     io = _parse_bool_cell(row[INDIVIDUAL_OPTIMIZE_COL])
     return SpecimenRecord(
-        name=str(name),
+        name=key,
         experimental_layout=lay,  # type: ignore[arg-type]
         path_ordered=_parse_bool_cell(row["path_ordered"]),
         skip_filter_resample=skip_fr,

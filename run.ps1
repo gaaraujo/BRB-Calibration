@@ -178,15 +178,20 @@ function Invoke-Pipeline {
   Invoke-Py scripts/calibrate/build_initial_brb_parameters.py
   Invoke-Py scripts/calibrate/plot_b_slopes.py
   Invoke-Py scripts/calibrate/plot_b_histograms_and_scatter.py
+  # Resampled loops: sig0 / elastic-ray overlays -> results/plots/apparent_b/sig0_slopes/
+  Invoke-Py scripts/calibrate/plot_sig0_slopes.py
 
   # --- Preset sim vs exp overlays (fixed b_p, b_n before L-BFGS; steel from set_id_settings.csv) ---
-  Invoke-Py scripts/calibrate/plot_preset_overlays.py --params results/calibration/individual_optimize/initial_brb_parameters.csv
-  # Alternative: --set-id-settings config/calibration/set_id_settings.csv if you want plot_preset_overlays to rebuild from catalog + settings instead of this CSV :)
+  Invoke-Py scripts/calibrate/plot_preset_overlays.py
 
   # --- SteelMPF calibration and sim vs exp overlays ---
   # L-BFGS box limits: config/calibration/params_limits.csv by default (override: --param-limits path)
   Invoke-Py scripts/calibrate/optimize_brb_mse.py @script:AmplitudeWeightPyArgs --initial-params results/calibration/individual_optimize/initial_brb_parameters.csv --output results/calibration/individual_optimize/optimized_brb_parameters.csv
   Invoke-Py scripts/calibrate/plot_params_vs_filtered.py --params results/calibration/individual_optimize/optimized_brb_parameters.csv --output-dir overlays
+
+  # --- Best L2 vs best L1 overlays (normalized loops, force/tangent multipanels, metrics table) ---
+  # Reads optimized_brb_parameters_metrics.csv + optimized_brb_parameters_simulated_force/*.csv (defaults).
+  Invoke-Py scripts/calibrate/plot_individual_best_l1_l2_overlays.py
 
   # --- Individual optimal parameters vs geometry ---
   # Uses optimized_brb_parameters_metrics.csv to pick best set per specimen (min final_J_feat_raw) and plots vs geometry.
@@ -196,11 +201,9 @@ function Invoke-Pipeline {
   # Uses the same "optimal" selection as the geometry plots (min final_J_feat_raw).
   Invoke-Py scripts/calibrate/report_param_geometry_correlations.py
 
-  # --- Averaged-parameter evaluation ---
-  Invoke-Py scripts/calibrate/eval_averaged_params.py @script:AmplitudeWeightPyArgs --params results/calibration/individual_optimize/optimized_brb_parameters.csv --output-params results/calibration/averaged_optimize/averaged_brb_parameters.csv --output-metrics results/calibration/averaged_optimize/averaged_params_eval_metrics.csv --output-plots-dir results/plots/calibration/averaged_optimize/overlays
-
-  # --- Generalized optimization + specimen-set eval --- (same config/calibration/params_limits.csv as optimize_brb_mse unless --param-limits)
-  Invoke-Py scripts/calibrate/optimize_generalized_brb_mse.py @script:AmplitudeWeightPyArgs --params results/calibration/individual_optimize/optimized_brb_parameters.csv --output-params results/calibration/generalized_optimize/generalized_brb_parameters.csv --output-metrics results/calibration/generalized_optimize/generalized_params_eval_metrics.csv --output-plots-dir results/plots/calibration/generalized_optimize/overlays
+  # --- Generalized optimization + specimen-set eval ---
+  # Seeds / optimize_params: config/calibration/set_id_settings_generalized.csv (override: --set-id-settings).
+  Invoke-Py scripts/calibrate/optimize_generalized_brb_mse.py @script:AmplitudeWeightPyArgs --output-params results/calibration/generalized_optimize/generalized_brb_parameters.csv --output-metrics results/calibration/generalized_optimize/generalized_params_eval_metrics.csv --output-plots-dir results/plots/calibration/generalized_optimize/overlays
 
   # --- Combined normalized overlays: one set{k}_combined_force_def_norm.png per set_id per method ---
   # Reads numerical-model *_simulated.csv under each method's *simulated_force/ (from optimize_brb_mse / eval above).
@@ -220,7 +223,7 @@ function Invoke-Pipeline {
   # Always --amplitude-weights so *_landmarks_exp.csv w_c matches J_feat (independent of $UseAmplitudeWeights).
   Invoke-Py scripts/calibrate/plot_cycle_landmarks_debug.py --amplitude-weights --params results/calibration/individual_optimize/optimized_brb_parameters.csv
 
-  # --- Averaged vs generalized narrative report (default: results/calibration/averaged_vs_generalized_metrics_report.md) ---
+  # --- Individual vs generalized narrative report (default: results/calibration/calibration_individual_generalized_report.md) ---
   Invoke-Py scripts/calibrate/report_averaged_vs_generalized_metrics.py
 
   } finally {

@@ -1,32 +1,23 @@
 """
 
-Calibration report: narrative (specimens, seed sets, objective, three analyses) plus tables of best
-**set_id** per specimen, specimen-set–wide best sets for averaged/generalized stages, and parameter extracts.
+Calibration report: narrative (specimens, seed sets, objective, analyses) plus tables of best
+**set_id** per specimen, specimen-set–wide best set for generalized optimization, and parameter extracts.
 
-- **Individual optimize**: for each specimen, which ``set_id`` minimizes ``final_J_total``
+- **Individual optimize**: for each specimen, which ``set_id`` minimizes ``final_J_total`` among
+  successful rows with finite **J**, plus a **single wide parameters table** (one row per specimen).
 
-  (among successful rows with finite J), plus a **single wide parameters table** (one row per specimen, ``set_id`` column + BRB fields from ``optimized_brb_parameters.csv``).
+- **Generalized optimize**: same per specimen, plus **best overall** ``set_id`` that minimizes the
+  specimen-weighted mean ``final_J_total`` over rows with **contributes_to_aggregate**; optional
+  best overall by contributor-weighted **final_unordered_J_binenv**, with parameter extracts.
 
-- **Averaged / generalized**: same per specimen, plus **best overall** ``set_id`` that minimizes the
-
-  specimen-weighted mean ``final_J_total`` over rows with **contributes_to_aggregate**; the report also
-
-  identifies best overall ``set_id`` by contributor-weighted **final_unordered_J_binenv** (when present),
-
-  with parameter extracts.
-
-- Writes **shared-backbone** columns of the parameters CSV for the best overall set (values
-
-  identical for every specimen at that ``set_id``, typically the averaged backbone
-
-  ``R0,cR1,cR2,a1–a4``) and a **full** parameters table for all specimens at that ``set_id``.
+- Writes **shared-backbone** columns of the generalized parameters CSV for the best overall set and a
+  **full** parameters table for all specimens at that ``set_id``.
 
 
 
 Example::
 
     python scripts/calibrate/report_averaged_vs_generalized_metrics.py
-    python scripts/calibrate/report_averaged_vs_generalized_metrics.py --per-specimen-delta
 """
 
 from __future__ import annotations
@@ -55,13 +46,12 @@ _PROJECT_ROOT = _SCRIPT_DIR.parent.parent
 
 _SCRIPTS = _PROJECT_ROOT / "scripts"
 
+sys.path.insert(0, str(_SCRIPTS / "postprocess"))
 sys.path.insert(0, str(_SCRIPTS))
 
 
 
 from calibrate.calibration_paths import (  # noqa: E402
-    AVERAGED_BRB_PARAMETERS_PATH,
-    AVERAGED_PARAMS_EVAL_METRICS_PATH,
     BRB_SPECIMENS_CSV,
     GENERALIZED_BRB_PARAMETERS_PATH,
     GENERALIZED_PARAMS_EVAL_METRICS_PATH,
@@ -69,9 +59,12 @@ from calibrate.calibration_paths import (  # noqa: E402
     OPTIMIZED_BRB_PARAMETERS_PATH,
     RESULTS_CALIBRATION,
     SET_ID_SETTINGS_CSV,
+    SET_ID_SETTINGS_GENERALIZED_CSV,
 )
 
 from calibrate.calibration_loss_settings import DEFAULT_CALIBRATION_LOSS_SETTINGS  # noqa: E402
+from calibrate.set_id_settings import read_set_id_settings_table  # noqa: E402
+from specimen_catalog import read_catalog  # noqa: E402
 
 
 
@@ -415,13 +408,14 @@ def _report_narrative_intro(specimens_path: Path, steel_seed_path: Path) -> list
         f"The table below lists specimens from the project catalog (`{specimens_path.name}`). "
         "Column **path_ordered** marks tests for which a time-ordered force–deformation history "
         "is available for calibration; where it is false, only digitized unordered F–u data are used in the "
-        "pipeline. **averaged_weight** and **generalized_weight** control each specimen’s influence on "
-        "averaged parameter aggregation and on generalized optimization (often zero for unordered-only tests). "
+        "pipeline. **generalized_weight** controls each specimen’s influence on generalized optimization "
+        "(often zero for unordered-only tests). **averaged_weight** is retained in the catalog for legacy "
+        "compat but is no longer used by the calibration scripts in this repo. "
         "**individual_optimize** flags specimens included in the per-specimen optimization sweep."
     )
     parts.append("")
     if specimens_path.is_file():
-        cat = pd.read_csv(specimens_path)
+        cat = read_catalog(Path(specimens_path).expanduser().resolve())
         prefer = [
             "Name",
             "path_ordered",
@@ -461,7 +455,7 @@ def _report_narrative_intro(specimens_path: Path, steel_seed_path: Path) -> list
     )
     parts.append("")
     if steel_seed_path.is_file():
-        seeds = pd.read_csv(steel_seed_path, comment="#")
+        seeds = read_set_id_settings_table(Path(steel_seed_path).expanduser().resolve())
         parts.append(_dataframe_to_md_table(seeds))
     else:
         parts.append(f"*(Steel seed file not found: `{steel_seed_path}`)*")
@@ -473,20 +467,22 @@ def _report_narrative_intro(specimens_path: Path, steel_seed_path: Path) -> list
     parts.append("## 3. Objective function")
     parts.append("")
     parts.append(
-        f"The optimization target matches **`optimize_brb_mse`**: a weighted sum of **raw** metrics from "
+        f"The optimization target matches **`optimize_brb_mse`** for individual runs: a weighted sum of **raw** metrics from "
         f"``config/calibration/set_id_settings.csv`` — per-``set_id`` objective weights for "
         f"cycle **landmark** error (**J_feat**, L2/L1), "
         f"per-cycle **energy** mismatch (**J_E**, L2/L1), and **binned cloud** terms (**J_binenv**, L2/L1). "
         f"Cycle weights **w_c** for **J_feat** default to uniform 1 (**`--amplitude-weights`** uses amplitude-based **w_c**). "
         f"Default L2 weights: **w_feat_l2** = {wf2:g}, **w_energy_l2** = {we2:g}. "
-        f"**final_J_total** is the weighted objective; metrics CSVs store the raw L2/L1 terms and **J_binenv**."
+        f"**final_J_total** is the weighted objective; metrics CSVs store the raw L2/L1 terms and **J_binenv**. "
+        f"**`optimize_generalized_brb_mse`** reads its per-``set_id`` objective weights (and ``optimize_params``) from "
+        f"``config/calibration/set_id_settings_generalized.csv`` by default."
     )
     parts.append("")
     parts.append("## 4. Analyses and what this report contains")
     parts.append("")
     parts.append(
-        "Three analyses reuse the same simulator and loss. Each subsequent section of this document "
-        "corresponds to one stage."
+        "Individual and generalized analyses reuse the same simulator and loss. Each subsequent section "
+        "of this document corresponds to one stage."
     )
     parts.append("")
     parts.append("### 4.1 Individual optimization")
@@ -505,53 +501,32 @@ def _report_narrative_intro(specimens_path: Path, steel_seed_path: Path) -> list
         "the optimized BRB parameters at that best **set_id**)."
     )
     parts.append("")
-    parts.append("### 4.2 Averaged parameters (mean per set) and evaluation")
-    parts.append("")
-    parts.append(
-        "After individual optimization, for each **set_id** we compute a **weighted average** of the "
-        "optimized parameters across specimens (catalog **averaged_weight**), producing one **averaged** "
-        "parameter vector per seed family. That vector is merged into **all** specimen rows and the "
-        "model is **re-simulated without further optimization**. This quantifies the error if the "
-        "specimen set adopted the mean of individually tuned parameters for each steel-set choice."
-    )
-    parts.append("")
-    parts.append(
-        "**Reported here:** *Averaged optimize — best set per specimen* (which **set_id** minimizes "
-        "**J** for each specimen under averaged steel), **Best overall set** for contributors "
-        "(specimen-weighted mean **J** minimized over **set_id** among rows with **contributes_to_aggregate**), "
-        "plus **best overall set** by contributor-weighted **final_unordered_J_binenv** "
-        "(when present in the metrics CSV), with shared backbone and full parameter tables, "
-        "and *Parameters for best overall sets* (shared backbone fields plus the full "
-        "parameter table at the winning **set_id** for **J**)."
-    )
-    parts.append("")
-    parts.append("### 4.3 Generalized (combined) optimization")
+    parts.append("### 4.2 Generalized (combined) optimization")
     parts.append("")
     parts.append(
         "Using the **individually optimized parameters CSV** as input, we run **generalized** optimization "
-        "(`optimize_generalized_brb_mse`). The starting iterate is a catalog-weighted **averaged** vector derived "
-        "from that table (the same construction idea as in **4.2 Averaged parameters**), then a shared subset of parameters "
-        "(`PARAMS_TO_OPTIMIZE`) is refined **simultaneously** across specimens to lower a **generalized_weight**-weighted "
+        "(`optimize_generalized_brb_mse`). The starting iterate comes from **`set_id_settings_generalized.csv`** "
+        "(numeric steel seeds; ``b_p``/``b_n`` must be numbers there—statistic keywords stay in "
+        "``set_id_settings.csv`` for individual runs), independent of which parameters were optimized during "
+        "individual calibration. A shared subset of "
+        "parameters listed there is refined **simultaneously** across specimens to lower a **generalized_weight**-weighted "
         "average of per-specimen **final_J_total**. The same landmark and energy objective apply. "
-        "The result is one coupled parameter set per **set_id** for the specimen set, written out and evaluated "
-        "like the averaged evaluation pass."
+        "The result is one coupled parameter set per **set_id** for the specimen set."
     )
     parts.append("")
     parts.append(
-        "**Reported here:** the generalized counterparts of the averaged sections (*Generalized optimize*, **Best overall set**, "
-        "best overall by **final_unordered_J_binenv** when present, "
-        "and generalized *Parameters for best overall sets*). The appendix *mean J by set (contributors only)* "
-        "compares contributor-averaged **J** between averaged evaluation and generalized evaluation at each **set_id**."
+        "**Reported here:** *Generalized optimize — best set per specimen*, **Best overall set** for contributors, "
+        "best overall by **final_unordered_J_binenv** when present, and generalized *Parameters for best overall sets*."
     )
     parts.append("")
     parts.append("## 5. Definitions used in the tables below")
     parts.append("")
     parts.append(
-        "- **Best set_id per specimen** (individual / averaged / generalized blocks): the **set_id** with lowest "
+        "- **Best set_id per specimen** (individual / generalized blocks): the **set_id** with lowest "
         "**final_J_total** among **evaluable** metrics rows for that specimen (**success** and finite **J**)."
     )
     parts.append(
-        "- **Best overall set_id** (averaged / generalized): the **set_id** that minimizes the **specimen_weight**-weighted "
+        "- **Best overall set_id** (generalized): the **set_id** that minimizes the **specimen_weight**-weighted "
         "mean **final_J_total** over rows with **contributes_to_aggregate**."
     )
     parts.append(
@@ -628,22 +603,12 @@ def _individual_best_params_wide_md(
 
 
 def main() -> None:
-
     """CLI entry point."""
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-
     ap.add_argument("--individual-metrics", type=Path, default=OPTIMIZED_BRB_PARAMETERS_METRICS_PATH)
-
     ap.add_argument("--individual-params", type=Path, default=OPTIMIZED_BRB_PARAMETERS_PATH)
-
-    ap.add_argument("--averaged-metrics", type=Path, default=AVERAGED_PARAMS_EVAL_METRICS_PATH)
-
     ap.add_argument("--generalized-metrics", type=Path, default=GENERALIZED_PARAMS_EVAL_METRICS_PATH)
-
-    ap.add_argument("--averaged-params", type=Path, default=AVERAGED_BRB_PARAMETERS_PATH)
-
     ap.add_argument("--generalized-params", type=Path, default=GENERALIZED_BRB_PARAMETERS_PATH)
-
     ap.add_argument(
         "--specimens-csv",
         type=Path,
@@ -654,204 +619,86 @@ def main() -> None:
         "--set-id-settings",
         type=Path,
         default=SET_ID_SETTINGS_CSV,
-        help="Unified set_id settings table for the report narrative",
+        help="Individual-stage set_id settings table for the report narrative",
     )
-
     ap.add_argument(
-
-        "--output",
-
+        "--set-id-settings-generalized",
         type=Path,
-
-        default=RESULTS_CALIBRATION / "averaged_vs_generalized_metrics_report.md",
-
+        default=SET_ID_SETTINGS_GENERALIZED_CSV,
+        help="Generalized-stage set_id settings (provenance in Inputs section)",
     )
-
     ap.add_argument(
-
-        "--per-specimen-delta",
-
-        action="store_true",
-
-        help="Append averaged vs generalized contributing-row J comparison table",
-
+        "--output",
+        type=Path,
+        default=RESULTS_CALIBRATION / "calibration_individual_generalized_report.md",
     )
-
-    ap.add_argument(
-
-        "--per-specimen",
-
-        action="store_true",
-
-        help=argparse.SUPPRESS,
-
-    )
-
     args = ap.parse_args()
 
-    if args.per_specimen:
-
-        args.per_specimen_delta = True
-
-
-
     ind_df = _load_metrics(args.individual_metrics)
-
     individual_params = _load_params(args.individual_params)
-
-    averaged_df = _load_metrics(args.averaged_metrics)
-
     generalized_df = _load_metrics(args.generalized_metrics)
-
-    averaged_params = _load_params(args.averaged_params)
-
     generalized_params = _load_params(args.generalized_params)
 
-
-
     metrics_cols = ["final_J_total", *REPORT_METRIC_COLS]
-
-    for d in (ind_df, averaged_df, generalized_df):
-
+    for d in (ind_df, generalized_df):
         for c in metrics_cols:
-
             if c not in d.columns:
-
                 d[c] = np.nan
-
             d[c] = pd.to_numeric(d[c], errors="coerce")
 
-
-
     ind_mask = _eval_mask(ind_df)
-
-    p_mask_eval = _eval_mask(averaged_df)
-
     j_mask_eval = _eval_mask(generalized_df)
-
-    p_mask_c = _contributing_mask(averaged_df)
-
     j_mask_c = _contributing_mask(generalized_df)
 
-
-
     best_ind = _best_set_per_specimen(ind_df, ind_mask)
-
-    best_p = _best_set_per_specimen(averaged_df, p_mask_eval)
-
     best_j = _best_set_per_specimen(generalized_df, j_mask_eval)
 
-
-
-    p_agg = _aggregate_by_set(averaged_df, p_mask_c, metrics_cols)
-
     j_agg = _aggregate_by_set(generalized_df, j_mask_c, metrics_cols)
-
-    best_set_averaged, mean_j_p = _best_overall_set_id(p_agg)
-
     best_set_generalized, mean_j_j = _best_overall_set_id(j_agg)
-
-    best_set_binenv_p, mean_binenv_p = _best_overall_set_id_for_metric(
-        p_agg, "final_unordered_J_binenv"
-    )
     best_set_binenv_j, mean_binenv_j = _best_overall_set_id_for_metric(
         j_agg, "final_unordered_J_binenv"
     )
 
-    const_p = _shared_backbone_constant_columns(averaged_params, best_set_averaged) if best_set_averaged is not None else {}
-
-    const_j = _shared_backbone_constant_columns(generalized_params, best_set_generalized) if best_set_generalized is not None else {}
-
-
+    const_j = (
+        _shared_backbone_constant_columns(generalized_params, best_set_generalized)
+        if best_set_generalized is not None
+        else {}
+    )
 
     lines: list[str] = []
-
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-
-    lines.append("# BRB calibration report: individual, averaged, and generalized analyses")
-
+    lines.append("# BRB calibration report: individual and generalized analyses")
     lines.append("")
-
     lines.append(f"Generated: **{now}**")
-
     lines.append("")
-
     lines.extend(_report_narrative_intro(args.specimens_csv, args.set_id_settings))
 
     lines.append("## Inputs")
-
     lines.append("")
-
     lines.append(f"- Specimen catalog (narrative): `{args.specimens_csv.resolve()}`")
-
-    lines.append(f"- set_id settings (narrative): `{args.set_id_settings.resolve()}`")
-
+    lines.append(f"- Individual set_id settings (narrative): `{args.set_id_settings.resolve()}`")
+    lines.append(f"- Generalized set_id settings: `{args.set_id_settings_generalized.resolve()}`")
     lines.append(f"- Individual metrics: `{args.individual_metrics.resolve()}`")
-
     lines.append(f"- Individual parameters: `{args.individual_params.resolve()}`")
-
-    lines.append(f"- Averaged metrics: `{args.averaged_metrics.resolve()}`")
-
     lines.append(f"- Generalized metrics: `{args.generalized_metrics.resolve()}`")
-
-    lines.append(f"- Averaged parameters: `{args.averaged_params.resolve()}`")
-
     lines.append(f"- Generalized parameters: `{args.generalized_params.resolve()}`")
-
     lines.append("")
 
     lines.append("## Executive summary")
-
     lines.append("")
-
-    if best_set_averaged is not None:
-
-        lines.append(
-
-            f"- **Averaged** (contributors): best overall **set_id = {best_set_averaged}** "
-
-            f"(weighted mean **final_J_total** = {_fmt_sci(mean_j_p)}). Parameters: shared-backbone list + full table below."
-
-        )
-
-    else:
-
-        lines.append("- **Averaged** (contributors): could not determine a best overall set.")
-
     if best_set_generalized is not None:
-
         lines.append(
-
             f"- **Generalized** (contributors): best overall **set_id = {best_set_generalized}** "
-
-            f"(weighted mean **final_J_total** = {_fmt_sci(mean_j_j)}). Parameters: shared-backbone list + full table below."
-
+            f"(weighted mean **final_J_total** = {_fmt_sci(mean_j_j)})."
         )
-
     else:
-
         lines.append("- **Generalized** (contributors): could not determine a best overall set.")
 
-    if best_set_binenv_p is not None and np.isfinite(mean_binenv_p):
-
-        lines.append(
-
-            f"- **Averaged** (contributors): best overall **set_id** by weighted mean **final_unordered_J_binenv** = **{best_set_binenv_p}** "
-
-            f"(mean = {_fmt_sci(mean_binenv_p)}); parameters in *Best overall set by `final_unordered_J_binenv`* under **Averaged optimize**."
-
-        )
-
     if best_set_binenv_j is not None and np.isfinite(mean_binenv_j):
-
         lines.append(
-
-            f"- **Generalized** (contributors): best overall **set_id** by weighted mean **final_unordered_J_binenv** = **{best_set_binenv_j}** "
-
-            f"(mean = {_fmt_sci(mean_binenv_j)}); parameters in *Best overall set by `final_unordered_J_binenv`* under **Generalized optimize**."
-
+            f"- **Generalized** (contributors): best overall **set_id** by weighted mean "
+            f"**final_unordered_J_binenv** = **{best_set_binenv_j}** (mean = {_fmt_sci(mean_binenv_j)})."
         )
-
     lines.append("")
 
     lines.append("## Individual optimize — best set per specimen")
@@ -899,88 +746,6 @@ def main() -> None:
     lines.append(_individual_best_params_wide_md(best_ind, individual_params))
 
     lines.append("")
-
-    lines.append("## Averaged optimize — best set per specimen")
-
-    lines.append("")
-
-    lines.append(f"Evaluable rows: **{int(p_mask_eval.sum())}** / {len(averaged_df)}.")
-
-    lines.append("")
-
-    pr = []
-
-    for _, r in best_p.sort_values("Name").iterrows():
-
-        row_cells = [
-            str(r["Name"]),
-            str(int(r["best_set_id"])),
-            _fmt_sci(float(r["final_J_total"])),
-        ]
-        for col in REPORT_METRIC_COLS:
-            row_cells.append(_fmt_metric_table_cell(r, col))
-        pr.append(row_cells)
-
-    avg_headers = ["Name", "best_set_id", "J", *REPORT_METRIC_HEADERS]
-    lines.append(_md_table(avg_headers, pr))
-
-    lines.append("")
-
-    lines.append("### Best overall set (contributing specimens)")
-
-    lines.append("")
-
-    lines.append(
-
-        "**Primary objective:** minimum weighted mean **final_J_total** over rows with **contributes_to_aggregate**."
-
-    )
-
-    lines.append("")
-
-    if best_set_averaged is not None:
-
-        lines.append(
-
-            f"- **set_id = {best_set_averaged}** (minimum weighted mean **final_J_total** = {_fmt_sci(mean_j_p)})."
-
-        )
-
-        lines.append(f"- Contributing rows used: **{int(p_mask_c.sum())}**.")
-
-    else:
-
-        lines.append("*(could not determine — no contributing evaluable rows)*")
-
-    lines.append("")
-
-    lines.append("#### Best overall set by `final_unordered_J_binenv` (contributors)")
-
-    lines.append("")
-
-    lines.append(
-
-        "Minimum weighted mean **final_unordered_J_binenv** over contributing rows (same weights; lower is better)."
-
-    )
-
-    lines.append("")
-
-    lines.extend(
-
-        _md_lines_best_set_by_metric(
-
-            averaged_params,
-
-            best_set_binenv_p,
-
-            "final_unordered_J_binenv",
-
-            mean_binenv_p,
-
-        )
-
-    )
 
     lines.append("## Generalized optimize — best set per specimen")
 
@@ -1064,47 +829,16 @@ def main() -> None:
 
     )
 
-    lines.append("## Parameters for best overall sets")
+    lines.append("## Parameters for best overall set (generalized)")
 
     lines.append("")
 
     lines.append(
-
         "Columns that are **identical for every specimen** at the chosen ``set_id`` "
-
-        "(shared across the specimen set at that ``set_id``; usually the averaged/generalized backbone ``R0``, ``cR1``, ``cR2``, ``a1``–``a4``)."
-
+        "(shared generalized backbone)."
     )
 
     lines.append("")
-
-    lines.append(f"### Averaged — set_id {best_set_averaged if best_set_averaged is not None else '—'}")
-
-    lines.append("")
-
-    if const_p:
-
-        for k, v in const_p.items():
-
-            lines.append(f"- `{k}` = {v}")
-
-    else:
-
-        lines.append("*(none or missing parameters CSV slice)*")
-
-    lines.append("")
-
-    lines.append("All specimen rows at this set (full parameter vector):")
-
-    lines.append("")
-
-    if best_set_averaged is not None:
-
-        lines.append(_params_slice_to_md(averaged_params, best_set_averaged))
-
-    lines.append("")
-
-
 
     lines.append(f"### Generalized — set_id {best_set_generalized if best_set_generalized is not None else '—'}")
 
@@ -1132,162 +866,17 @@ def main() -> None:
 
     lines.append("")
 
-
-
-    merged = j_agg.merge(
-
-        p_agg,
-
-        on="set_id",
-
-        how="outer",
-
-        suffixes=("_generalized", "_averaged"),
-
-    ).sort_values("set_id")
-
-    lines.append("## Appendix: mean J by set (contributors only) — generalized vs averaged")
-
+    lines.append("## Appendix: mean J by set (contributors only) — generalized")
     lines.append("")
-
     ar = []
-
-    for _, row in merged.iterrows():
-
-        jj = float(row["final_J_total_generalized"]) if pd.notna(row.get("final_J_total_generalized")) else float("nan")
-
-        jp = float(row["final_J_total_averaged"]) if pd.notna(row.get("final_J_total_averaged")) else float("nan")
-
-        win = ""
-
-        if np.isfinite(jj) and np.isfinite(jp):
-
-            if jj < jp - 1e-18:
-
-                win = "generalized"
-
-            elif jp < jj - 1e-18:
-
-                win = "averaged"
-
-            else:
-
-                win = "tie"
-
-        ar.append(
-
-            [
-
-                str(int(row["set_id"])),
-
-                _fmt_sci(jj),
-
-                _fmt_sci(jp),
-
-                _fmt_sci(jp - jj),
-
-                win,
-
-            ]
-
-        )
-
-    lines.append(_md_table(["set_id", "mean_J_generalized", "mean_J_averaged", "Δ(avg−gen)", "lower_J"], ar))
-
+    for _, row in j_agg.sort_values("set_id").iterrows():
+        jj = float(row["final_J_total"]) if pd.notna(row.get("final_J_total")) else float("nan")
+        ar.append([str(int(row["set_id"])), _fmt_sci(jj)])
+    lines.append(_md_table(["set_id", "mean_J_generalized"], ar))
     lines.append("")
-
-
-
-    if args.per_specimen_delta:
-
-        cols = ["Name", "set_id", "specimen_weight"] + metrics_cols
-
-        js = generalized_df.loc[j_mask_c, cols].copy()
-
-        ps = averaged_df.loc[j_mask_c, cols].copy()
-
-        comp = js.merge(
-
-            ps,
-
-            on=["Name", "set_id"],
-
-            how="outer",
-
-            suffixes=("_generalized", "_averaged"),
-
-            indicator=True,
-
-        ).sort_values(["Name", "set_id"])
-
-        lines.append("## Appendix: per-(Name, set_id) J — contributing rows only")
-
-        lines.append("")
-
-        ph = [
-
-            "Name",
-
-            "set_id",
-
-            "J_generalized",
-
-            "J_averaged",
-
-            "Δ(A−G)",
-
-            "_merge",
-
-        ]
-
-        pr2 = []
-
-        for _, r in comp.iterrows():
-
-            jtj = r.get("final_J_total_generalized")
-
-            jtp = r.get("final_J_total_averaged")
-
-            d = (
-
-                float(jtp) - float(jtj)
-
-                if pd.notna(jtj) and pd.notna(jtp)
-
-                else float("nan")
-
-            )
-
-            pr2.append(
-
-                [
-
-                    str(r["Name"]),
-
-                    str(int(r["set_id"])) if pd.notna(r["set_id"]) else "",
-
-                    _fmt_sci(float(jtj)) if pd.notna(jtj) else "",
-
-                    _fmt_sci(float(jtp)) if pd.notna(jtp) else "",
-
-                    _fmt_sci(d),
-
-                    str(r["_merge"]),
-
-                ]
-
-            )
-
-        lines.append(_md_table(ph, pr2))
-
-        lines.append("")
-
-
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
-
     args.output.write_text("\n".join(lines) + "\n", encoding="utf-8")
-
     print(f"Wrote {args.output.resolve()}")
 
 

@@ -5,8 +5,8 @@ Raw digitized histories often contain small displacement reversals from measurem
 We (1) optionally median-filter, (2) **Ramer-Douglas-Peucker** simplify the polyline
 ``(s, u)`` where ``s`` is cumulative |Deltau| along the recorded order (both in inches), then
 (3) **resample** at uniform spacing in cumulative |Deltau| (same rule as ``resample_segment_along_u_path``),
-then **prepend** a sample with **zero deformation** at the start of the series (rest at ``t=0``
-before the first recorded point, matching CSVs whose first row is often at ``t>0``).
+then **prepend** a leading sample ``0.1\,D_\mathrm{sample}`` (same ``D_\mathrm{sample}`` as resampling;
+small offset from zero as a SteelMPF workaround).
 
 This yields a drive that moves in clear half-cycles (monotonic between turning points) without
 tiny noise loops, while staying close to the original path in the (s,u) plane.
@@ -24,16 +24,19 @@ from calibrate.resample_experiment import d_sampling_from_brace_params, resample
 # Default RDP tolerance [in]: suppress perpendicular deviations smaller than this in (s,u).
 DEFAULT_RDP_EPSILON_IN = 0.005
 
+# Leading drive sample = this fraction × D_sampling [in] (temporary workaround for SteelMPF zero-step history).
+PREPEND_LEAD_FRAC = 0.1
 
-def prepend_zero_deformation(u: np.ndarray) -> np.ndarray:
+
+def prepend_lead_deformation(u: np.ndarray, d_sampling_in: float) -> np.ndarray:
     """
-    Prepend one sample ``Deformation[in] = 0`` at the start of the drive.
+    Prepend one sample ``Deformation[in] = PREPEND_LEAD_FRAC * d_sampling_in`` at the start of the drive.
 
-    OpenSees receives only the displacement vector; this matches a physical **rest state at
-    time 0 s** before the first digitized point (which often begins at ``t > 0``).
+    Uses the same ``d_sampling_in`` spacing [in] as uniform |Δu| resampling (or brace-based D_sampling).
     """
     u = np.asarray(u, dtype=float).reshape(-1)
-    return np.concatenate([[0.0], u])
+    lead = float(PREPEND_LEAD_FRAC) * float(d_sampling_in)
+    return np.concatenate([[lead], u])
 
 
 def _point_to_segment_distance(p: np.ndarray, a: np.ndarray, b: np.ndarray) -> float:
@@ -119,11 +122,47 @@ def prepare_deformation_drive(
     u_fallback
         Array passed to ``d_sampling_from_brace_params`` when Dy is invalid (usually same as ``u``).
 
-    After all steps, **prepend** ``0.0`` deformation (see ``prepend_zero_deformation``).
+    After all steps, **prepend** ``PREPEND_LEAD_FRAC * D_\mathrm{sample}`` (see ``prepend_lead_deformation``).
     """
     u = np.asarray(u, dtype=float).reshape(-1)
+    uf = u_fallback if u_fallback is not None else u
+
+    def _d_sp_for_lead() -> float:
+        if d_sampling_in is not None and float(d_sampling_in) > 0.0:
+            return float(d_sampling_in)
+        if brace is not None:
+            try:
+                return d_sampling_from_brace_params(
+                    fyp_ksi=float(brace["fyp_ksi"]),
+                    L_T_in=float(brace["L_T_in"]),
+                    L_y_in=float(brace["L_y_in"]),
+                    A_sc_in2=float(brace["A_sc_in2"]),
+                    A_t_in2=float(brace["A_t_in2"]),
+                    E_ksi=float(brace["E_ksi"]),
+                    u_fallback=uf,
+                )
+            except (KeyError, TypeError, ValueError):
+                umax = float(np.nanmax(np.abs(u))) if u.size else float(np.nanmax(np.abs(uf)))
+                d_sp = umax / 100.0 if umax > 0 else 1e-6
+                warnings.warn(
+                    "prepare_deformation_drive: incomplete brace dict; "
+                    f"using d_sampling = max(|u|)/100 ~ {d_sp:.6g} in.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+                return d_sp
+        umax = float(np.nanmax(np.abs(u))) if u.size else float(np.nanmax(np.abs(uf)))
+        d_sp = umax / 100.0 if umax > 0 else 1e-6
+        warnings.warn(
+            "prepare_deformation_drive: no d_sampling_in or brace; "
+            f"using max(|u|)/100 ~ {d_sp:.6g} in.",
+            UserWarning,
+            stacklevel=2,
+        )
+        return d_sp
+
     if u.size == 0:
-        return prepend_zero_deformation(u)
+        return np.array([float(PREPEND_LEAD_FRAC) * _d_sp_for_lead()], dtype=float)
 
     if median_kernel > 1:
         k = int(median_kernel)
@@ -135,12 +174,11 @@ def prepare_deformation_drive(
         u = rdp_simplify_displacement(u, rdp_epsilon_in)
 
     if u.size <= 1:
-        return prepend_zero_deformation(u)
+        return prepend_lead_deformation(u, _d_sp_for_lead())
 
     if not resample:
-        return prepend_zero_deformation(u)
+        return prepend_lead_deformation(u, _d_sp_for_lead())
 
-    uf = u_fallback if u_fallback is not None else u
     if d_sampling_in is not None and float(d_sampling_in) > 0.0:
         d_sp = float(d_sampling_in)
     elif brace is not None:
@@ -174,4 +212,4 @@ def prepare_deformation_drive(
         )
 
     u_out, _ = resample_segment_along_u_path(u, u, d_sp)
-    return prepend_zero_deformation(u_out)
+    return prepend_lead_deformation(u_out, d_sp)

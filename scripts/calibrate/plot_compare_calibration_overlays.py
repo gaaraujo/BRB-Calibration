@@ -9,12 +9,16 @@ path-ordered specimens). Normalization and styling match ``plot_params_vs_filter
 numerical-model response along the drive (experimental ``Force[kip]`` may be all-NaN in those CSVs).
 
 Writes ``set{k}_combined_force_def_norm.png`` into each method's ``overlays/`` folder (or
-``individual_optimize/overlays_initial_params/`` for ``plot_preset_overlays.py``). Each subplot uses
+``individual_optimize/overlays_initial_params/``, with params inferred as ``initial_brb_parameters.csv``.
+For generalized **multi-config** runs the optimizer writes its per-config eval outputs into
+``overlays/config_set_{k}/`` and ``..._simulated_force/config_set_{k}/`` subfolders; the script
+discovers those subdirectories and writes the combined PNG into the matching
+``overlays/config_set_{k}/set{k}_combined_force_def_norm.png``. Each subplot uses
 the specimen name as its title. One figure-level legend for the grid.
-Generalized/averaged figures use ``#001F3F`` solid ``Numerical (train)`` vs ``#FF0E00`` ``Numerical (validation)``
-for specimens outside the training set (catalog ``generalized_weight`` / ``averaged_weight`` zero, or
-digitized unordered panels). Individual combined figures use the train color only.
-Default targets: individual (3 columns), generalized, and averaged (4 columns each).
+Generalized figures use ``#001F3F`` solid ``Numerical (train)`` vs ``#FF0E00`` ``Numerical (validation)``
+for specimens outside the training set (catalog ``generalized_weight`` zero, or digitized unordered panels).
+Individual combined figures use the train color only.
+Default targets: individual (3 columns) and generalized (4 columns).
 """
 from __future__ import annotations
 
@@ -37,14 +41,13 @@ sys.path.insert(0, str(_SCRIPTS))
 sys.path.insert(0, str(_SCRIPTS / "postprocess"))
 
 from calibrate.calibration_paths import (  # noqa: E402
-    AVERAGED_BRB_PARAMETERS_PATH,
-    AVERAGED_SIMULATED_FORCE_DIR,
     BRB_SPECIMENS_CSV,
     GENERALIZED_BRB_PARAMETERS_PATH,
     GENERALIZED_SIMULATED_FORCE_DIR,
+    INITIAL_BRB_PARAMETERS_PATH,
+    INITIAL_PARAMS_SIMULATED_FORCE_ALL_SPECIMENS_DIR,
     INDIVIDUAL_SIMULATED_FORCE_DIR,
     OPTIMIZED_BRB_PARAMETERS_PATH,
-    PLOTS_AVERAGED_OPTIMIZE,
     PLOTS_GENERALIZED_OPTIMIZE,
     PLOTS_INDIVIDUAL_OPTIMIZE,
 )
@@ -55,11 +58,9 @@ from calibrate.plot_params_vs_filtered import (  # noqa: E402
     LINEWIDTH_EXPERIMENTAL,
     LINEWIDTH_SIMULATED,
 )
-from calibrate.specimen_weights import (  # noqa: E402
-    make_generalized_weight_fn,
-    make_averaged_weight_fn,
-)
+from calibrate.specimen_weights import make_generalized_weight_fn  # noqa: E402
 from postprocess.plot_dimensions import (  # noqa: E402
+    AXES_SPINE_LINEWIDTH,
     COLOR_EXPERIMENTAL,
     COLOR_NUMERICAL_COHORT,
     COLOR_NUMERICAL_COHORT_AUX,
@@ -67,7 +68,7 @@ from postprocess.plot_dimensions import (  # noqa: E402
     SAVE_DPI,
     configure_matplotlib_style,
     figsize_for_grid,
-    grid_montage_rcparams,
+    overlay_grid_montage_rcparams,
     style_axes_spines_and_ticks,
 )
 from postprocess.plot_specimens import (  # noqa: E402
@@ -99,12 +100,6 @@ DEFAULT_TARGETS: tuple[tuple[Path, Path, Path, int], ...] = (
         GENERALIZED_SIMULATED_FORCE_DIR,
         GRID_COLS_GENERALIZED_AVERAGED,
     ),
-    (
-        PLOTS_AVERAGED_OPTIMIZE / "overlays",
-        AVERAGED_BRB_PARAMETERS_PATH,
-        AVERAGED_SIMULATED_FORCE_DIR,
-        GRID_COLS_GENERALIZED_AVERAGED,
-    ),
 )
 
 
@@ -115,8 +110,16 @@ def _infer_from_overlay_dir(overlay_dir: Path) -> tuple[Path, Path] | None:
         parent = p.parent
         if parent.name == "individual_optimize":
             return (
-                parent / "initial_params_overlay_parameters.csv",
+                INITIAL_BRB_PARAMETERS_PATH,
                 parent / "initial_params_simulated_force",
+            )
+        return None
+    if p.name == "overlays_initial_params_all_specimens":
+        parent = p.parent
+        if parent.name == "individual_optimize":
+            return (
+                INITIAL_BRB_PARAMETERS_PATH,
+                INITIAL_PARAMS_SIMULATED_FORCE_ALL_SPECIMENS_DIR,
             )
         return None
     if p.name != "overlays":
@@ -132,18 +135,17 @@ def _infer_from_overlay_dir(overlay_dir: Path) -> tuple[Path, Path] | None:
             parent / "generalized_brb_parameters.csv",
             parent / "generalized_params_eval_metrics_simulated_force",
         )
-    if parent.name == "averaged_optimize":
-        return (
-            parent / "averaged_brb_parameters.csv",
-            parent / "averaged_params_eval_metrics_simulated_force",
-        )
     return None
 
 
 def _grid_cols_for_overlay_dir(overlay_dir: Path) -> int:
-    """Three columns for ``individual_optimize/overlays``; four for generalized/averaged (or unknown)."""
+    """Three columns for ``individual_optimize/overlays``; four for generalized (or unknown)."""
     p = overlay_dir.resolve()
-    if p.parent.name == "individual_optimize" and p.name in ("overlays", "overlays_initial_params"):
+    if p.parent.name == "individual_optimize" and p.name in (
+        "overlays",
+        "overlays_initial_params",
+        "overlays_initial_params_all_specimens",
+    ):
         return GRID_COLS_INDIVIDUAL
     return GRID_COLS_GENERALIZED_AVERAGED
 
@@ -160,6 +162,50 @@ def _discover_simulated_index(sim_dir: Path) -> dict[int, set[str]]:
         name, sid_s = m.group(1), m.group(2)
         out.setdefault(int(sid_s), set()).add(name)
     return out
+
+
+_CONFIG_SET_DIR_PATTERN = re.compile(r"^config_set_(\d+)$")
+
+
+def _config_set_subdirs(parent: Path) -> list[tuple[int, Path]]:
+    """``[(K, parent/config_set_K), ...]`` sorted by K. Empty if ``parent`` lacks such subdirs."""
+    if not parent.is_dir():
+        return []
+    found: list[tuple[int, Path]] = []
+    for child in parent.iterdir():
+        if not child.is_dir():
+            continue
+        m = _CONFIG_SET_DIR_PATTERN.match(child.name)
+        if not m:
+            continue
+        found.append((int(m.group(1)), child))
+    found.sort(key=lambda kv: kv[0])
+    return found
+
+
+def _expand_config_set_targets(
+    targets: tuple[tuple[Path, Path, Path, int], ...],
+) -> list[tuple[Path, Path, Path, int]]:
+    """
+    Expand any (out_dir, params_csv, sim_dir, grid_cols) where ``sim_dir`` contains
+    ``config_set_K/`` subdirectories into one target per subdirectory pointing at
+    (out_dir/config_set_K, params_csv, sim_dir/config_set_K, grid_cols).
+
+    The generalized optimizer writes its per-config eval outputs into ``config_set_K/``
+    subfolders (when ``plot_multi_cfg=True``), so combined montages must follow the same
+    layout. Targets without such subdirs (e.g., the individual side, or single-config runs)
+    pass through unchanged.
+    """
+    expanded: list[tuple[Path, Path, Path, int]] = []
+    for out_dir, params_csv, sim_dir, grid_cols in targets:
+        subdirs = _config_set_subdirs(sim_dir)
+        if not subdirs:
+            expanded.append((out_dir, params_csv, sim_dir, grid_cols))
+            continue
+        for _set_k, sim_sub in subdirs:
+            out_sub = out_dir / sim_sub.name
+            expanded.append((out_sub, params_csv, sim_sub, grid_cols))
+    return expanded
 
 
 def _order_specimens(names: set[str], catalog_names: list[str]) -> list[str]:
@@ -185,7 +231,7 @@ def _numerical_color_for_combined_cell(
 ) -> str:
     """
     Individual method: all ``Numerical`` traces use the train color (per-specimen optimization).
-    Generalized/averaged: train color if the specimen has positive stage weight on the path-ordered objective;
+    Generalized: train color if the specimen has positive stage weight on the path-ordered objective;
     digitized-unordered panels and zero-weight path specimens use the validation color.
     """
     if stage_weight_fn is None:
@@ -199,12 +245,23 @@ def _stage_weight_fn_for_overlay_out_dir(
     out_dir: Path,
     catalog: pd.DataFrame,
 ) -> Callable[[str], float] | None:
-    """Weight function for generalized/averaged combined grids; ``None`` for individual overlays."""
+    """
+    Weight function for generalized combined grids; ``None`` for individual overlays.
+
+    Matches both the legacy single-config layout (``generalized_optimize/overlays``) and the
+    multi-config layout (``generalized_optimize/overlays/config_set_K``) so the train/validation
+    color split is preserved for both.
+    """
     p = out_dir.resolve()
-    if p.name == "overlays" and p.parent.name == "generalized_optimize":
+    if p.parent.name == "generalized_optimize" and p.name in ("overlays", "overlays_train_mean_bn_bp"):
         return make_generalized_weight_fn(catalog)
-    if p.name == "overlays" and p.parent.name == "averaged_optimize":
-        return make_averaged_weight_fn(catalog)
+    # Multi-config: out_dir is ``generalized_optimize/overlays/config_set_K``.
+    if (
+        _CONFIG_SET_DIR_PATTERN.match(p.name)
+        and p.parent.name in ("overlays", "overlays_train_mean_bn_bp")
+        and p.parent.parent.name == "generalized_optimize"
+    ):
+        return make_generalized_weight_fn(catalog)
     return None
 
 
@@ -227,7 +284,7 @@ def _numerical_legend_line2ds_for_grid(
     catalog: pd.DataFrame,
     stage_weight_fn: Callable[[str], float] | None,
 ) -> tuple[list[Line2D], list[str]]:
-    """Dashed numerical legend entries: train color only for individual; train + validation for generalized/averaged."""
+    """Dashed numerical legend entries: train color only for individual; train + validation for generalized."""
     present = {_numerical_color_for_combined_cell(n, catalog, stage_weight_fn) for n in specimen_names}
     out_h: list[Line2D] = []
     out_labels: list[str] = []
@@ -451,8 +508,8 @@ def _plot_one_subplot_norm(
     ax.set_title(specimen_id)
     apply_normalized_fu_axes(ax, pct_decimals=0)
     ax.grid(True, alpha=0.3)
-    ax.axhline(0, color="k", linewidth=0.4)
-    ax.axvline(0, color="k", linewidth=0.4)
+    ax.axhline(0, color="k", linewidth=AXES_SPINE_LINEWIDTH)
+    ax.axvline(0, color="k", linewidth=AXES_SPINE_LINEWIDTH)
     style_axes_spines_and_ticks(ax)
 
 
@@ -489,7 +546,7 @@ def plot_combined_for_set(
 
     # ``sharex='col'`` / ``sharey='row'``: same limits across the grid, but each column gets x tick
     # labels on its bottom axis and each row gets y labels on its left (not a single global axis).
-    with plt.rc_context(grid_montage_rcparams()):
+    with plt.rc_context(overlay_grid_montage_rcparams()):
         fig, axs = plt.subplots(
             nrow,
             ncol,
@@ -567,7 +624,7 @@ def main() -> None:
         help=(
             "Output directory for combined PNGs (default: each method's overlays/). "
             "If passed alone, params CSV and numerical-model CSV dir are inferred when this is "
-            ".../<individual|generalized|averaged>_optimize/overlays."
+            ".../<individual|generalized>_optimize/overlays."
         ),
     )
     p.add_argument(
@@ -615,6 +672,12 @@ def main() -> None:
         targets: tuple[tuple[Path, Path, Path, int], ...] = ((od, params_path, sim_d, gc),)
     else:
         targets = DEFAULT_TARGETS
+
+    # Expand any target whose sim_dir contains ``config_set_K/`` subdirectories into one target
+    # per subdir. Required for generalized multi-config runs, where the optimizer writes per-config
+    # eval outputs (and per-specimen overlays) into ``overlays/config_set_K`` and
+    # ``..._simulated_force/config_set_K``.
+    targets = tuple(_expand_config_set_targets(targets))
 
     any_written = False
     for out_dir, params_csv, sim_dir, grid_cols in targets:

@@ -114,12 +114,34 @@ from calibrate.calibration_paths import (  # noqa: E402
     SET_ID_SETTINGS_CSV,
 )
 from calibrate.param_limits import bounds_dict_for  # noqa: E402
-from calibrate.params_to_optimize import PARAMS_TO_OPTIMIZE  # noqa: E402
+from calibrate.params_to_optimize import (  # noqa: E402
+    PARAMS_TO_OPTIMIZE,
+    SIM_PARAM_FILL_DEFAULTS,
+    SIM_PARAMS_FROM_ROW,
+)
+from calibrate.steel_model import (  # noqa: E402
+    SHARED_STEEL_KEYS,
+    STEEL4_ISO_KEYS,
+    STEEL_MODEL_STEEL4,
+    STEEL_MODEL_STEELMPF,
+    STEELMPF_ISO_KEYS,
+    clamp_steel4_isotropic_slopes,
+    normalize_steel_model,
+    sync_steel4_isotropic_slopes_in_output_row,
+)
 from calibrate.set_id_optimize_params import (  # noqa: E402
     resolve_loss_settings_for_set_id,
     resolve_optimize_params_for_set_id,
 )
-from calibrate.set_id_settings import load_set_id_optimize_and_loss  # noqa: E402
+from calibrate.set_id_settings import (  # noqa: E402
+    apply_param_value_ties,
+    load_inherit_from_set_by_set_id,
+    load_param_alias_ties_by_set_id,
+    load_set_id_optimize_and_loss,
+    load_set_id_settings,
+    sync_tied_columns_in_output_row,
+)
+from calibrate.build_initial_brb_parameters import _is_missing_sentinel  # noqa: E402
 from calibrate.specimen_weights import catalog_metrics_fields, names_for_individual_optimize  # noqa: E402
 from calibrate.digitized_unordered_eval_lib import compute_unordered_binenv_metrics  # noqa: E402
 from calibrate.lbfgsb_reparam import (  # noqa: E402
@@ -131,16 +153,18 @@ from postprocess.cycle_points import find_cycle_points, load_cycle_points_resamp
 from postprocess.plot_dimensions import (  # noqa: E402
     AXES_SPINE_COLOR,
     AXES_SPINE_LINEWIDTH,
-    LEGEND_FONT_SIZE_SMALL_PT,
+    AXES_SPINE_LINEWIDTH_SINGLE_AX,
+    LEGEND_FONT_SIZE_SINGLE_AX_PT,
     SAVE_DPI,
     SINGLE_FIGSIZE_IN,
     configure_matplotlib_style,
+    single_axis_style_context,
     style_major_tick_lines,
+    style_single_axis_spines,
 )
 from postprocess.plot_specimens import (  # noqa: E402
     NORM_FORCE_LABEL,
     NORM_STRAIN_LABEL,
-    _set_axes_frame,
     apply_normalized_fu_axes,
     set_symmetric_axes,
 )
@@ -286,8 +310,10 @@ def save_simulated_force_history_csv(
     return path
 
 
-# Significant figures for numeric columns in optimized_brb_parameters.csv (not decimal places).
-OUTPUT_CSV_SIGFIGS = 6
+# Uniform decimal places for float columns in parameter CSVs (integers like ID/set_id unchanged).
+OUTPUT_CSV_DECIMAL_PLACES = 10
+OUTPUT_CSV_FLOAT_FMT = f"%.{OUTPUT_CSV_DECIMAL_PLACES}f"
+
 
 def force_scale_s_f(F_exp: np.ndarray) -> float:
     """S_F = max(F_exp) - min(F_exp); fallback 1.0."""
@@ -298,20 +324,23 @@ def force_scale_s_f(F_exp: np.ndarray) -> float:
     return r
 
 
-def _float_round_sigfigs(x: float, n: int) -> float:
-    """Round ``x`` to ``n`` significant figures (not ``n`` decimal places)."""
-    if not math.isfinite(x):
-        return x
-    if x == 0.0:
-        return 0.0
-    exp = math.floor(math.log10(abs(x)))
-    return round(x, n - 1 - exp)
-
-
-def _dataframe_for_param_csv(df: pd.DataFrame, *, sigfigs: int) -> pd.DataFrame:
-    """Format numeric columns for human-readable CSV: ``sigfigs`` significant figures."""
+def _dataframe_for_param_csv(
+    df: pd.DataFrame,
+    *,
+    decimal_places: int = OUTPUT_CSV_DECIMAL_PLACES,
+) -> pd.DataFrame:
+    """Round float numeric columns to a uniform decimal-place count for tidy CSV tables."""
     out = df.copy()
     int_cols = {"ID", "set_id"}
+
+    def _cell_float(v: object) -> float:
+        if pd.isna(v):
+            return np.nan
+        xf = float(v)
+        if not math.isfinite(xf):
+            return xf
+        return round(xf, decimal_places)
+
     for col in out.columns:
         if col == "Name":
             continue
@@ -324,20 +353,48 @@ def _dataframe_for_param_csv(df: pd.DataFrame, *, sigfigs: int) -> pd.DataFrame:
                 out[col] = out[col].astype(np.int64)
             continue
 
-        def _cell(v: object) -> float:
-            """Format one Markdown table cell (numeric or placeholder)."""
-            if pd.isna(v):
-                return np.nan
-            return _float_round_sigfigs(float(v), sigfigs)
-
-        out[col] = s.map(_cell)
+        out[col] = s.map(_cell_float)
     return out
 
 
-def _row_to_sim_params(prow: pd.Series) -> dict:
-    """Build kwargs for run_simulation. Keys match CSV columns after ID, Name, set_id (SteelMPF order)."""
-    keys = ("L_T", "L_y", "A_sc", "A_t", "fyp", "fyn", "E", "b_p", "b_n", "R0", "cR1", "cR2", "a1", "a2", "a3", "a4")
-    return {k: float(prow[k]) for k in keys}
+def _row_to_sim_params(prow: pd.Series) -> dict[str, float]:
+    """
+    Build float kwargs for ``run_simulation`` (excludes ``steel_model``).
+
+    Keys match ``SIM_PARAMS_FROM_ROW``. Missing optional columns use ``SIM_PARAM_FILL_DEFAULTS``.
+    """
+    out: dict[str, float] = {}
+    for k in SIM_PARAMS_FROM_ROW:
+        if k in prow.index and pd.notna(prow.get(k)):
+            out[k] = float(prow[k])
+        elif k in SIM_PARAM_FILL_DEFAULTS:
+            out[k] = float(SIM_PARAM_FILL_DEFAULTS[k])
+        else:
+            raise KeyError(f"Missing required simulation column {k!r} in parameters row")
+    return out
+
+
+def run_simulation_kwargs_from_prow(prow: pd.Series) -> tuple[str, dict[str, float]]:
+    """Normalized ``steel_model`` plus float kwargs for ``run_simulation``."""
+    sm = normalize_steel_model(prow.get("steel_model"))
+    kw = _row_to_sim_params(prow)
+    if sm == STEEL_MODEL_STEEL4:
+        kw = clamp_steel4_isotropic_slopes(kw)
+    return sm, kw
+
+
+def run_simulation_kwargs_from_prow_with_ties(
+    prow: pd.Series,
+    *,
+    param_ties: dict[str, str],
+    optimized_param_names: frozenset[str],
+) -> tuple[str, dict[str, float]]:
+    """Like ``run_simulation_kwargs_from_prow`` but enforces ``set_id_settings`` param→param ties."""
+    sm, kw = run_simulation_kwargs_from_prow(prow)
+    apply_param_value_ties(kw, param_ties, optimized_param_names)
+    if sm == STEEL_MODEL_STEEL4:
+        kw = clamp_steel4_isotropic_slopes(kw)
+    return sm, kw
 
 
 def simulate_and_loss_breakdown(
@@ -544,9 +601,14 @@ def optimize_one_specimen(
     p_y_ref: float,
     s_d: float,
     loss: CalibrationLossSettings,
+    param_ties: dict[str, str] | None = None,
 ) -> tuple[pd.Series, LossBreakdown | None, LossBreakdown | None, np.ndarray | None, np.ndarray | None]:
     """Return optimized row, initial/final ``LossBreakdown`` (or None), and simulated forces."""
-    fixed_params = _row_to_sim_params(prow)
+    ties = param_ties or {}
+    opt_set = frozenset(params_to_optimize)
+    sm, fixed_params = run_simulation_kwargs_from_prow_with_ties(
+        prow, param_ties=ties, optimized_param_names=opt_set
+    )
     fy_ksi = float(prow["fyp"])
     a_sc = float(prow["A_sc"])
     use_norm, Ls, Us, x0, scipy_bounds = prepare_lbfgsb_parameterization(
@@ -561,8 +623,9 @@ def optimize_one_specimen(
         x: np.ndarray, *, full_metrics: bool
     ) -> tuple[LossBreakdown, np.ndarray] | None:
         params = {**fixed_params, **variable_params_from_optimizer_x(x, params_to_optimize, use_norm, Ls, Us)}
+        apply_param_value_ties(params, ties, opt_set)
         try:
-            F_sim = run_simulation(D_exp, **params)
+            F_sim = run_simulation(D_exp, steel_model=sm, **params)
         except Exception:
             return None
         F_sim = np.asarray(F_sim, dtype=float)
@@ -616,6 +679,8 @@ def optimize_one_specimen(
     out_row = prow.copy()
     for name in params_to_optimize:
         out_row[name] = physical[name]
+    sync_tied_columns_in_output_row(out_row, ties, opt_set)
+    sync_steel4_isotropic_slopes_in_output_row(out_row)
 
     F_sim_final: np.ndarray | None
     bd_final: LossBreakdown | None
@@ -707,28 +772,29 @@ def plot_amplitude_diagnostics(
     idx = np.arange(len(meta))
     amps = [float(m.get("amp", 0.0)) for m in meta]
     w_cs = [float(m.get("w_c", 0.0)) for m in meta]
-    fig, ax = plt.subplots(figsize=SINGLE_FIGSIZE_IN, layout="constrained")
-    fig.patch.set_facecolor("white")
-    ax.plot(idx, amps, "o-", label=r"$A_c$", markersize=3)
-    ax.set_xlabel("Cycle index")
-    ax.set_ylabel("Amplitude |u| [in]")
-    ax2 = ax.twinx()
-    ax2.plot(idx, w_cs, "s--", color="C1", label=r"$w_c$", markersize=3)
-    ax2.set_ylabel(r"$w_c$")
-    ax.grid(True, alpha=0.3)
-    _style_twin_y_axes_frame(ax, ax2)
-    h1, l1 = ax.get_legend_handles_labels()
-    h2, l2 = ax2.get_legend_handles_labels()
-    fig.legend(
-        h1 + h2,
-        l1 + l2,
-        loc="outside upper center",
-        ncol=2,
-        fontsize=LEGEND_FONT_SIZE_SMALL_PT,
-        frameon=False,
-    )
-    fig.savefig(out_dir / f"{specimen_id}_set{set_id}_amplitude_diagnostics.png", dpi=SAVE_DPI)
-    plt.close(fig)
+    with single_axis_style_context():
+        fig, ax = plt.subplots(figsize=SINGLE_FIGSIZE_IN, layout="constrained")
+        fig.patch.set_facecolor("white")
+        ax.plot(idx, amps, "o-", label=r"$A_c$", markersize=3)
+        ax.set_xlabel("Cycle index")
+        ax.set_ylabel("Amplitude |u| [in]")
+        ax2 = ax.twinx()
+        ax2.plot(idx, w_cs, "s--", color="C1", label=r"$w_c$", markersize=3)
+        ax2.set_ylabel(r"$w_c$")
+        ax.grid(True, alpha=0.3)
+        _style_twin_y_axes_frame(ax, ax2, linewidth=AXES_SPINE_LINEWIDTH_SINGLE_AX)
+        h1, l1 = ax.get_legend_handles_labels()
+        h2, l2 = ax2.get_legend_handles_labels()
+        fig.legend(
+            h1 + h2,
+            l1 + l2,
+            loc="outside upper center",
+            ncol=2,
+            fontsize=LEGEND_FONT_SIZE_SINGLE_AX_PT,
+            frameon=False,
+        )
+        fig.savefig(out_dir / f"{specimen_id}_set{set_id}_amplitude_diagnostics.png", dpi=SAVE_DPI)
+        plt.close(fig)
 
 
 def plot_cycle_weight_hysteresis(
@@ -752,38 +818,39 @@ def plot_cycle_weight_hysteresis(
         fyA, L_yf = 1.0, 1.0
     D_n = np.asarray(D_exp, dtype=float) / L_yf
     F_n = np.asarray(F_exp, dtype=float) / fyA
-    fig, ax = plt.subplots(figsize=SINGLE_FIGSIZE_IN, layout="constrained")
-    fig.patch.set_facecolor("white")
-    ax.set_facecolor("white")
-    sc = ax.scatter(
-        D_n,
-        F_n,
-        c=w,
-        cmap="viridis",
-        s=4,
-        alpha=0.8,
-    )
-    plt.colorbar(sc, ax=ax, label=r"Cycle weight $w_i$")
-    for m in meta:
-        s = int(m["start"])
-        if 0 <= s < len(D_exp):
-            ax.axvline(
-                float(D_n[s]),
-                color="red",
-                alpha=0.25,
-                linewidth=0.8,
-            )
-    set_symmetric_axes(ax, D_n, F_n)
-    ax.set_xlabel(NORM_STRAIN_LABEL)
-    ax.set_ylabel(NORM_FORCE_LABEL)
-    apply_normalized_fu_axes(ax)
-    ax.grid(True, alpha=0.3)
-    ax.axhline(0, color="k", linewidth=0.4)
-    ax.axvline(0, color="k", linewidth=0.4)
-    _set_axes_frame(ax)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    fig.savefig(out_dir / f"{specimen_id}_set{set_id}_cycle_weights.png", dpi=SAVE_DPI)
-    plt.close(fig)
+    with single_axis_style_context():
+        fig, ax = plt.subplots(figsize=SINGLE_FIGSIZE_IN, layout="constrained")
+        fig.patch.set_facecolor("white")
+        ax.set_facecolor("white")
+        sc = ax.scatter(
+            D_n,
+            F_n,
+            c=w,
+            cmap="viridis",
+            s=4,
+            alpha=0.8,
+        )
+        plt.colorbar(sc, ax=ax, label=r"Cycle weight $w_i$")
+        for m in meta:
+            s = int(m["start"])
+            if 0 <= s < len(D_exp):
+                ax.axvline(
+                    float(D_n[s]),
+                    color="red",
+                    alpha=0.25,
+                    linewidth=0.8,
+                )
+        set_symmetric_axes(ax, D_n, F_n)
+        ax.set_xlabel(NORM_STRAIN_LABEL)
+        ax.set_ylabel(NORM_FORCE_LABEL)
+        apply_normalized_fu_axes(ax)
+        ax.grid(True, alpha=0.3)
+        ax.axhline(0, color="k", linewidth=AXES_SPINE_LINEWIDTH_SINGLE_AX)
+        ax.axvline(0, color="k", linewidth=AXES_SPINE_LINEWIDTH_SINGLE_AX)
+        style_single_axis_spines(ax)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        fig.savefig(out_dir / f"{specimen_id}_set{set_id}_cycle_weights.png", dpi=SAVE_DPI)
+        plt.close(fig)
 
     df_meta = meta_to_dataframe(meta)
     df_meta.to_csv(
@@ -873,6 +940,20 @@ def main() -> None:
         else None
     )
     optimize_by_set_id, loss_by_set_id = load_set_id_optimize_and_loss(opt_csv_path)
+    alias_by_set_id = load_param_alias_ties_by_set_id(opt_csv_path)
+    inherit_from_set = load_inherit_from_set_by_set_id(opt_csv_path)
+    settings_df_for_inherit = (
+        load_set_id_settings(opt_csv_path) if inherit_from_set else None
+    )
+    if inherit_from_set:
+        chains = ", ".join(f"{c}<-{p}" for c, p in sorted(inherit_from_set.items()))
+        print(
+            f"inherit_from_set chains (child<-parent, applied per specimen at run time): {chains}"
+        )
+        print(
+            "  explicit (non--999) steel cells in a child's set_id_settings row are preserved; "
+            "parent's optimum only fills missing/-999 cells."
+        )
     if optimize_by_set_id or loss_by_set_id:
         _sip_show = opt_csv_path if opt_csv_path is not None else SET_ID_SETTINGS_CSV
         print(f"Per-set_id settings CSV: {_sip_show}")
@@ -937,6 +1018,67 @@ def main() -> None:
             bounds_cache[key] = bounds_dict_for(list(active), limits_path=args.param_limits)
         return bounds_cache[key]
 
+    def _seed_keys_for_sm(sm: str) -> frozenset[str]:
+        sm_n = normalize_steel_model(sm)
+        bn = ("b_p", "b_n")
+        if sm_n == STEEL_MODEL_STEELMPF:
+            return frozenset((*SHARED_STEEL_KEYS, *bn, *STEELMPF_ISO_KEYS))
+        if sm_n == STEEL_MODEL_STEEL4:
+            return frozenset((*SHARED_STEEL_KEYS, *bn, *STEEL4_ISO_KEYS))
+        return frozenset((*SHARED_STEEL_KEYS, *bn))
+
+    def _explicit_steel_cols_for_set_id(set_id: int) -> frozenset[str]:
+        """Steel-param columns where the child's set_id_settings.csv row is non-blank/non--999.
+
+        These cells (numeric or stat keyword like ``"weighted_mean"``) win over the parent's
+        optimum during overlay so users can pin individual columns alongside ``inherit_from_set``.
+        """
+        if settings_df_for_inherit is None:
+            return frozenset()
+        m = settings_df_for_inherit["set_id"] == int(set_id)
+        if not bool(m.any()):
+            return frozenset()
+        row = settings_df_for_inherit.loc[m].iloc[0]
+        allow = _seed_keys_for_sm(row.get("steel_model"))
+        return frozenset(
+            k for k in allow if k in row.index and not _is_missing_sentinel(row[k])
+        )
+
+    def _apply_inherit_overlay(
+        prow: pd.Series,
+        parent_row: pd.Series,
+        target_steel_model: object,
+        skip_keys: frozenset[str] = frozenset(),
+    ) -> tuple[pd.Series, list[str], list[str]]:
+        """
+        Overlay parent's optimized parameter values onto child's row (returns a copy).
+
+        Limited to seed columns valid for the child's ``steel_model``; geometry / yield / id
+        columns (Name, ID, set_id, steel_model, L_T, L_y, A_sc, A_t, fyp, fyn) are never copied.
+        Columns in ``skip_keys`` (explicit child cells) are also preserved unchanged.
+        Returns (overlaid_row, names_overlaid, names_kept_explicit).
+        """
+        out = prow.copy()
+        allow = _seed_keys_for_sm(target_steel_model)
+        overlaid: list[str] = []
+        kept_explicit: list[str] = []
+        for k in allow:
+            if k not in parent_row.index or k not in out.index:
+                continue
+            if k in skip_keys:
+                kept_explicit.append(k)
+                continue
+            v = parent_row.get(k)
+            try:
+                fv = float(v)
+            except (TypeError, ValueError):
+                continue
+            if not np.isfinite(fv):
+                continue
+            out[k] = fv
+            overlaid.append(k)
+        return out, sorted(overlaid), sorted(kept_explicit)
+
     out_rows = []
     metrics_rows: list[dict] = []
     for sid in specimens:
@@ -973,8 +1115,34 @@ def main() -> None:
         )
 
         CYCLE_WEIGHT_PLOTS_DIR.mkdir(parents=True, exist_ok=True)
+        optimized_for_specimen: dict[int, pd.Series] = {}
         for _, prow in rows_for_specimen.iterrows():
             try:
+                set_id_int = int(pd.to_numeric(prow["set_id"], errors="raise"))
+                parent_sid = inherit_from_set.get(set_id_int)
+                if parent_sid is not None:
+                    parent_row = optimized_for_specimen.get(parent_sid)
+                    if parent_row is None:
+                        print(
+                            f"  {sid} (set {set_id_int}): inherit_from_set={parent_sid} "
+                            "requested but parent has no optimized result yet for this specimen; "
+                            "using initial seeds from initial_brb_parameters.csv."
+                        )
+                    else:
+                        skip_keys = _explicit_steel_cols_for_set_id(set_id_int)
+                        prow, overlaid, kept_explicit = _apply_inherit_overlay(
+                            prow, parent_row, prow.get("steel_model"), skip_keys=skip_keys
+                        )
+                        if overlaid or kept_explicit:
+                            msg = (
+                                f"  {sid} (set {set_id_int}): inherited from set {parent_sid} "
+                                f"for {len(overlaid)} steel column(s)"
+                            )
+                            if kept_explicit:
+                                msg += (
+                                    f"; kept explicit child cells for {kept_explicit}"
+                                )
+                            print(msg + ".")
                 active = resolve_optimize_params_for_set_id(
                     optimize_by_set_id,
                     prow.get("set_id"),
@@ -1013,8 +1181,12 @@ def main() -> None:
                     p_y_ref=p_y_specimen,
                     s_d=s_d_ref,
                     loss=loss,
+                    param_ties=alias_by_set_id.get(int(pd.to_numeric(prow["set_id"], errors="raise")), {}),
                 )
                 out_rows.append(out_row)
+                optimized_for_specimen[set_id_int] = (
+                    out_row if isinstance(out_row, pd.Series) else pd.Series(out_row)
+                )
                 set_id = prow.get("set_id", "?")
                 sim_hist_dir = simulated_force_history_dir(out_path)
                 saved_npz = save_simulated_force_history(
@@ -1120,9 +1292,9 @@ def main() -> None:
 
     out_df = pd.DataFrame(full_rows)
     out_df = out_df[params_df.columns.tolist()]
-    out_df = _dataframe_for_param_csv(out_df, sigfigs=OUTPUT_CSV_SIGFIGS)
+    out_df = _dataframe_for_param_csv(out_df)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_df.to_csv(out_path, index=False)
+    out_df.to_csv(out_path, index=False, float_format=OUTPUT_CSV_FLOAT_FMT)
     print(f"Wrote {out_path} ({len(out_df)} rows, one per initial parameter row)")
 
     metrics_keys = {(str(m["Name"]), int(m["set_id"])) for m in metrics_rows}

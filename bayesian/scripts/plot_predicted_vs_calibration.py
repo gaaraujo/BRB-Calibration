@@ -23,17 +23,25 @@ import numpy as np
 import pandas as pd
 
 _ROOT = Path(__file__).resolve().parent.parent
+_REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
+_pp = _REPO_ROOT / "scripts" / "postprocess"
+if str(_pp) not in sys.path:
+    sys.path.insert(0, str(_pp))
 
 from model import run_analysis
 
 from lib.specimen_config import load_specimen_config, resolve_path
 
+from plot_dimensions import LINEWIDTH_HYSTERESIS_OVERLAY_EXPERIMENTAL
+
 # Match ``postprocess/plot_dimensions.py`` / individual-optimize overlays.
 COLOR_EXPERIMENTAL = "#B0B0B0"
 COLOR_SIMULATED = "#001F3F"
-LINEWIDTH = 0.9
+LINEWIDTH = LINEWIDTH_HYSTERESIS_OVERLAY_EXPERIMENTAL
+# Match ``for spine in ax.spines: spine.set_linewidth(...)`` below (not repo ``AXES_SPINE_LINEWIDTH``).
+SPINE_LINEWIDTH = 0.6
 SAVE_DPI = 300
 FIGSIZE_IN = (2.5, 2.25)
 
@@ -176,8 +184,8 @@ def main() -> None:
         ax.set_xlabel(NORM_STRAIN_LABEL)
         ax.set_ylabel(NORM_FORCE_LABEL)
         ax.xaxis.set_major_formatter(_fraction_to_percent_formatter(decimals=2))
-        ax.axhline(0, color="k", linewidth=0.5)
-        ax.axvline(0, color="k", linewidth=0.5)
+        ax.axhline(0, color="k", linewidth=SPINE_LINEWIDTH)
+        ax.axvline(0, color="k", linewidth=SPINE_LINEWIDTH)
 
         ax_top = ax.twiny()
         ax_top.set_xlim(x_lo * L_y, x_hi * L_y)
@@ -201,11 +209,11 @@ def main() -> None:
         )
 
         for spine in ax.spines.values():
-            spine.set_linewidth(0.6)
+            spine.set_linewidth(SPINE_LINEWIDTH)
         for spine in ax_top.spines.values():
-            spine.set_linewidth(0.6)
+            spine.set_linewidth(SPINE_LINEWIDTH)
         for spine in ax_right.spines.values():
-            spine.set_linewidth(0.6)
+            spine.set_linewidth(SPINE_LINEWIDTH)
 
         args.output.parent.mkdir(parents=True, exist_ok=True)
         fig.savefig(args.output, dpi=SAVE_DPI)

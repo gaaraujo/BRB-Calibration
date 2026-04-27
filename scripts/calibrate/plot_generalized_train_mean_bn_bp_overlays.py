@@ -11,6 +11,9 @@ Writes ``{Name}_set{k}_simulated.csv`` under ``generalized_train_mean_bn_bp_simu
 Typical (after ``optimize_generalized_brb_mse.py``)::
 
     python scripts/calibrate/plot_generalized_train_mean_bn_bp_overlays.py
+
+By default, every ``set_id`` present in ``generalized_brb_parameters.csv`` is processed; pass
+``--sets`` to restrict (e.g. ``--sets 1-10``).
 """
 from __future__ import annotations
 
@@ -34,29 +37,21 @@ from calibrate.calibration_paths import (  # noqa: E402
     GENERALIZED_TRAIN_MEAN_BN_BP_SIMULATED_FORCE_DIR,
     PLOTS_GENERALIZED_TRAIN_MEAN_BN_BP_OVERLAYS,
 )
-from calibrate.digitized_unordered_eval_lib import (  # noqa: E402
-    eval_row_with_envelope_bn_from_unordered,
-    load_digitized_unordered_series,
-)
-from calibrate.optimize_brb_mse import (  # noqa: E402
-    _row_to_sim_params,
-    run_simulation,
-    save_simulated_force_history_csv,
-)
 from calibrate.plot_compare_calibration_overlays import (  # noqa: E402
     GRID_COLS_GENERALIZED_AVERAGED,
     _discover_simulated_index,
     _order_specimens,
     plot_combined_for_set,
 )
-from calibrate.plot_params_vs_filtered import write_one_specimen_simulated_csvs  # noqa: E402
+from calibrate.plot_params_vs_filtered import (  # noqa: E402
+    write_one_specimen_simulated_csvs,
+    write_unordered_simulated_csv_for_set,
+)
 from calibrate.specimen_weights import make_generalized_weight_fn  # noqa: E402
 from specimen_catalog import (  # noqa: E402
-    get_specimen_record,
     list_names_digitized_unordered,
     path_ordered_resampled_force_csv_stems,
     read_catalog,
-    uses_unordered_inputs,
 )
 
 
@@ -69,6 +64,15 @@ def _parse_set_ids(spec: str) -> list[int]:
             lo, hi = hi, lo
         return list(range(lo, hi + 1))
     return [int(x) for x in spec.split(",") if x]
+
+
+def _unique_set_ids_from_params(params_df: pd.DataFrame) -> list[int]:
+    """Sorted unique finite ``set_id`` values from generalized parameters CSV."""
+    if "set_id" not in params_df.columns:
+        raise SystemExit("Parameters CSV missing 'set_id' column")
+    sid = pd.to_numeric(params_df["set_id"], errors="coerce")
+    vals = sorted({int(x) for x in sid.dropna().unique().tolist() if np.isfinite(x)})
+    return vals
 
 
 def _as_bool_series(s: pd.Series) -> pd.Series:
@@ -122,45 +126,6 @@ def _weighted_mean_bn_bp_for_set(
     return bp_bar, bn_bar
 
 
-def _write_unordered_simulated_for_set(
-    *,
-    specimen_id: str,
-    set_id: int,
-    prow: pd.Series,
-    catalog_by_name: pd.DataFrame,
-    sim_dir: Path,
-) -> bool:
-    cat_row = catalog_by_name.loc[specimen_id]
-    if isinstance(cat_row, pd.DataFrame):
-        cat_row = cat_row.iloc[0]
-    series = load_digitized_unordered_series(
-        specimen_id,
-        _PROJECT_ROOT,
-        steel_row=prow,
-        catalog_row=cat_row,
-    )
-    if series is None:
-        print(f"  skip unordered {specimen_id} set {set_id}: digitized load failed")
-        return False
-    D_drive, u_c, F_c = series
-    eval_row = prow.copy()
-    sim_row = eval_row_with_envelope_bn_from_unordered(eval_row, cat_row, u_c, F_c)
-    try:
-        F_sim = np.asarray(run_simulation(D_drive, **_row_to_sim_params(sim_row)), dtype=float)
-    except Exception as exc:
-        print(f"  skip unordered {specimen_id} set {set_id}: simulation failed: {exc}")
-        return False
-    if F_sim.shape != D_drive.shape:
-        print(f"  skip unordered {specimen_id} set {set_id}: shape mismatch")
-        return False
-    F_exp_na = np.full_like(D_drive, np.nan, dtype=float)
-    out = save_simulated_force_history_csv(sim_dir, specimen_id, set_id, D_drive, F_exp_na, F_sim)
-    if out is not None:
-        print(f"  Wrote {out.name}")
-        return True
-    return False
-
-
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument(
@@ -190,8 +155,8 @@ def main() -> None:
     p.add_argument(
         "--sets",
         type=str,
-        default="1-10",
-        help='set_id list, e.g. "1-10" or "7" or "1,3,5"',
+        default=None,
+        help='set_id list, e.g. "1-10" or "7" or "1,3,5"; default: all set_id in --params CSV',
     )
     args = p.parse_args()
 
@@ -211,13 +176,17 @@ def main() -> None:
 
     params_df = pd.read_csv(params_path)
     metrics_df = pd.read_csv(metrics_path)
+    if args.sets is None:
+        set_ids = _unique_set_ids_from_params(params_df)
+        if not set_ids:
+            raise SystemExit(f"No finite set_id values in parameters CSV: {params_path}")
+    else:
+        set_ids = _parse_set_ids(args.sets)
     catalog = read_catalog(BRB_SPECIMENS_CSV)
     catalog_names = catalog["Name"].astype(str).tolist()
     catalog_by_name = catalog.set_index("Name")
     resampled_stems = set(path_ordered_resampled_force_csv_stems(catalog, project_root=_PROJECT_ROOT))
     unordered_eligible = set(list_names_digitized_unordered(catalog))
-
-    set_ids = _parse_set_ids(args.sets)
     sim_dir.mkdir(parents=True, exist_ok=True)
     overlays_dir.mkdir(parents=True, exist_ok=True)
 
@@ -258,12 +227,13 @@ def main() -> None:
                 )
             elif name in unordered_eligible:
                 prow = prow_block.iloc[0]
-                _write_unordered_simulated_for_set(
+                write_unordered_simulated_csv_for_set(
                     specimen_id=name,
                     set_id=set_id,
                     prow=prow,
                     catalog_by_name=catalog_by_name,
                     sim_dir=sim_dir,
+                    project_root=_PROJECT_ROOT,
                 )
 
         idx = _discover_simulated_index(sim_dir)

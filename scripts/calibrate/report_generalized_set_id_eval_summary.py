@@ -1,7 +1,8 @@
 """
-Per-``set_id`` summary of generalized eval metrics (contributing path-ordered rows only).
+Per generalized CSV ``set_id`` (or legacy per-``set_id``) summary of generalized eval metrics (contributing path-ordered rows only).
 
-Writes a CSV with, for each ``set_id``: specimen count, then for ``final_J_total``,
+Writes a CSV with, for each rollup key (``generalized_config_set_id`` when present in metrics, else legacy
+``generalized_cohort_id``, else ``set_id``): specimen count, then for ``final_J_total``,
 ``final_J_feat_raw``, and ``final_J_E_raw``: **specimen_weight**-weighted mean (same idea as
 aggregated metrics reports); largest/smallest specimen and raw values; weighted mean with
 that largest (or smallest) specimen removed from the pool.
@@ -9,8 +10,8 @@ that largest (or smallest) specimen removed from the pool.
 Also writes **train** vs **validation** CSVs for unordered cloud metrics ``J_binenv`` and
 ``J_binenv_L1`` (``final_unordered_J_binenv``, ``final_unordered_J_binenv_l1``): training rows are
 generalized **contributors** (same mask as above); validation rows are all other specimens
-in the metrics file for that ``set_id``. Train uses ``specimen_weight``; validation uses
-uniform weights.
+in the metrics file for that rollup key (same precedence as above).
+Train uses ``specimen_weight``; validation uses uniform weights.
 
 Used by ``optimize_generalized_brb_mse`` after ``generalized_params_eval_metrics.csv`` is
 written (outputs default under ``summary_statistics/``); can also be run standalone on an existing metrics file.
@@ -29,6 +30,12 @@ _SCRIPT_DIR = Path(__file__).resolve().parent
 _PROJECT_ROOT = _SCRIPT_DIR.parent.parent
 _SCRIPTS = _PROJECT_ROOT / "scripts"
 sys.path.insert(0, str(_SCRIPTS))
+sys.path.insert(0, str(_SCRIPTS / "postprocess"))
+
+from specimen_catalog import GENERALIZED_CONFIG_SET_ID_COL  # noqa: E402
+
+# Older metrics CSVs from optimize_generalized_brb_mse used this column name.
+_LEGACY_GENERALIZED_COHORT_COL = "generalized_cohort_id"
 
 from calibrate.calibration_paths import (  # noqa: E402
     GENERALIZED_PARAMS_EVAL_METRICS_PATH,
@@ -65,8 +72,17 @@ def _human_unordered_j_columns(label: str) -> list[str]:
     ]
 
 
-def _unordered_j_column_order() -> list[str]:
-    cols = ["set_id", "num_specimens"]
+def _rollup_key(df: pd.DataFrame) -> str:
+    """Column used to group generalized metrics (config set_id when emitted by optimize script)."""
+    if GENERALIZED_CONFIG_SET_ID_COL in df.columns:
+        return GENERALIZED_CONFIG_SET_ID_COL
+    if _LEGACY_GENERALIZED_COHORT_COL in df.columns:
+        return _LEGACY_GENERALIZED_COHORT_COL
+    return "set_id"
+
+
+def _unordered_j_column_order(rollup_key: str) -> list[str]:
+    cols = [rollup_key, "num_specimens"]
     for _, lbl in UNORDERED_J_SPECS:
         cols.extend(_human_unordered_j_columns(lbl))
     return cols
@@ -143,10 +159,11 @@ def _block_stats(names: np.ndarray, values: np.ndarray, weights: np.ndarray) -> 
 
 
 def build_set_id_eval_summary(df: pd.DataFrame) -> pd.DataFrame:
-    """Filter contributors and aggregate one row per ``set_id``."""
+    """Filter contributors and aggregate one row per rollup key (cohort or legacy ``set_id``)."""
+    rollup = _rollup_key(df)
     required = {
         "Name",
-        "set_id",
+        rollup,
         "specimen_weight",
         "contributes_to_aggregate",
         "success",
@@ -164,8 +181,8 @@ def build_set_id_eval_summary(df: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame()
 
     rows: list[dict[str, Any]] = []
-    for sid, g in sub.groupby("set_id", sort=True):
-        rec: dict[str, Any] = {"set_id": sid, "num_specimens": int(len(g))}
+    for sid, g in sub.groupby(rollup, sort=True):
+        rec: dict[str, Any] = {rollup: sid, "num_specimens": int(len(g))}
         names = g["Name"].astype(str).to_numpy()
         w = pd.to_numeric(g["specimen_weight"], errors="coerce").fillna(0.0).to_numpy(dtype=float)
         for col, key in METRIC_SPECS:
@@ -182,7 +199,7 @@ def build_set_id_eval_summary(df: pd.DataFrame) -> pd.DataFrame:
         rows.append(rec)
 
     out = pd.DataFrame(rows)
-    col_order = ["set_id", "num_specimens"]
+    col_order = [rollup, "num_specimens"]
     for _, key in METRIC_SPECS:
         col_order.extend(
             [
@@ -200,14 +217,15 @@ def build_set_id_eval_summary(df: pd.DataFrame) -> pd.DataFrame:
 
 def _rows_unordered_j_split(df: pd.DataFrame, *, train: bool) -> list[dict[str, Any]]:
     """
-    One row per ``set_id`` for either training (generalized contributors) or validation (all other rows).
+    One row per rollup key for either training (generalized contributors) or validation (all other rows).
 
     Training uses ``specimen_weight`` like the main generalized summary; validation uses uniform weights.
     """
+    rollup = _rollup_key(df)
     contrib = _contributing_mask(df)
     required = {
         "Name",
-        "set_id",
+        rollup,
         "specimen_weight",
         "contributes_to_aggregate",
         "success",
@@ -221,11 +239,11 @@ def _rows_unordered_j_split(df: pd.DataFrame, *, train: bool) -> list[dict[str, 
             raise ValueError(f"metrics frame missing column {col!r}")
 
     rows: list[dict[str, Any]] = []
-    for sid, g in df.groupby("set_id", sort=True):
+    for sid, g in df.groupby(rollup, sort=True):
         m = contrib.reindex(g.index).fillna(False).astype(bool)
         sub = g.loc[m] if train else g.loc[~m]
         n_eff = int(len(sub))
-        rec: dict[str, Any] = {"set_id": sid, "num_specimens": n_eff}
+        rec: dict[str, Any] = {rollup: sid, "num_specimens": n_eff}
         if n_eff == 0:
             for _, lbl in UNORDERED_J_SPECS:
                 for h in _human_unordered_j_columns(lbl):
@@ -256,7 +274,7 @@ def _rows_unordered_j_split(df: pd.DataFrame, *, train: bool) -> list[dict[str, 
 
 def build_unordered_j_train_validation_summaries(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Return ``(train_summary, validation_summary)`` with spreadsheet-style column names."""
-    cols = _unordered_j_column_order()
+    cols = _unordered_j_column_order(_rollup_key(df))
     if df.empty:
         empty = pd.DataFrame(columns=cols)
         return empty, empty

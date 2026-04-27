@@ -19,7 +19,11 @@ import seaborn as sns
 
 from cycle_points import load_cycle_points_for_trimmed_length
 from plot_dimensions import (
+    AXES_SPINE_LINEWIDTH,
+    AXES_SPINE_LINEWIDTH_SINGLE_AX,
     COLOR_EXPERIMENTAL,
+    HYSTERESIS_LINEWIDTH_SCALE,
+    LEGEND_FONT_SIZE_SINGLE_AX_PT,
     LEGEND_FONT_SIZE_SMALL_PT,
     SAVE_DPI,
     PLOT_FONT_SIZE_PT,
@@ -29,7 +33,9 @@ from plot_dimensions import (
     figsize_for_grid,
     figsize_two_stacked_axes,
     grid_montage_rcparams,
+    single_axis_style_context,
     style_axes_spines_and_ticks,
+    style_single_axis_spines,
 )
 from load_raw import load_raw_full, load_raw_valid
 from specimen_catalog import (
@@ -298,74 +304,75 @@ def plot_one_specimen(
     raw_n = normalize(raw_df, f_yc, A_c, L_y)
     filtered_n = normalize(filtered_df, f_yc, A_c, L_y) if filtered_df is not None else None
 
-    fig, ax = plt.subplots(figsize=SINGLE_FIGSIZE_IN, layout="constrained")
-    if unordered_digitized:
-        ax.scatter(
-            raw_n["Deformation_norm"],
-            raw_n["Force_norm"],
-            label="Raw (unordered)",
-            color=COLOR_EXPERIMENTAL,
-            alpha=0.35,
-            s=6,
-            linewidths=0,
-        )
-        if filtered_n is not None:
+    with single_axis_style_context():
+        fig, ax = plt.subplots(figsize=SINGLE_FIGSIZE_IN, layout="constrained")
+        if unordered_digitized:
             ax.scatter(
-                filtered_n["Deformation_norm"],
-                filtered_n["Force_norm"],
-                label="Filtered (unordered)",
-                color="tab:orange",
-                alpha=0.45,
+                raw_n["Deformation_norm"],
+                raw_n["Force_norm"],
+                label="Raw (unordered)",
+                color=COLOR_EXPERIMENTAL,
+                alpha=0.35,
                 s=6,
                 linewidths=0,
             )
-    else:
-        ax.plot(
-            raw_n["Deformation_norm"],
-            raw_n["Force_norm"],
-            label="Trimmed",
-            color=COLOR_EXPERIMENTAL,
-            alpha=0.7,
-            linewidth=0.8,
-        )
-        if filtered_n is not None:
+            if filtered_n is not None:
+                ax.scatter(
+                    filtered_n["Deformation_norm"],
+                    filtered_n["Force_norm"],
+                    label="Filtered (unordered)",
+                    color="tab:orange",
+                    alpha=0.45,
+                    s=6,
+                    linewidths=0,
+                )
+        else:
             ax.plot(
-                filtered_n["Deformation_norm"],
-                filtered_n["Force_norm"],
-                label="Filtered",
-                color="tab:orange",
-                linewidth=1,
+                raw_n["Deformation_norm"],
+                raw_n["Force_norm"],
+                label="Trimmed",
+                color=COLOR_EXPERIMENTAL,
+                alpha=0.7,
+                linewidth=0.8 * HYSTERESIS_LINEWIDTH_SCALE,
             )
-    parts_x = [raw_n["Deformation_norm"].values]
-    parts_y = [raw_n["Force_norm"].values]
-    if filtered_n is not None:
-        parts_x.append(filtered_n["Deformation_norm"].values)
-        parts_y.append(filtered_n["Force_norm"].values)
-    x_all = np.concatenate(parts_x)
-    y_all = np.concatenate(parts_y)
-    set_symmetric_axes(ax, x_all, y_all)
-    if filtered_df is not None and filtered_n is not None:
-        pts = load_cycle_points_for_trimmed_length(specimen_id, len(filtered_df))
-        if pts:
-            plot_characteristic_points(ax, filtered_n, pts, add_legend=True)
-    ax.set_xlabel(NORM_STRAIN_LABEL)
-    ax.set_ylabel(NORM_FORCE_LABEL)
-    apply_normalized_fu_axes(ax)
-    h, lab = ax.get_legend_handles_labels()
-    fig.legend(
-        h,
-        lab,
-        loc="outside upper center",
-        ncol=3,
-        fontsize=LEGEND_FONT_SIZE_SMALL_PT,
-        frameon=False,
-    )
-    ax.grid(True, alpha=0.3)
-    ax.axhline(0, color="k", linewidth=0.5)
-    ax.axvline(0, color="k", linewidth=0.5)
-    _set_axes_frame(ax)
-    fig.savefig(out_dir / f"{specimen_id}.png", dpi=SAVE_DPI)
-    plt.close(fig)
+            if filtered_n is not None:
+                ax.plot(
+                    filtered_n["Deformation_norm"],
+                    filtered_n["Force_norm"],
+                    label="Filtered",
+                    color="tab:orange",
+                    linewidth=1.0 * HYSTERESIS_LINEWIDTH_SCALE,
+                )
+        parts_x = [raw_n["Deformation_norm"].values]
+        parts_y = [raw_n["Force_norm"].values]
+        if filtered_n is not None:
+            parts_x.append(filtered_n["Deformation_norm"].values)
+            parts_y.append(filtered_n["Force_norm"].values)
+        x_all = np.concatenate(parts_x)
+        y_all = np.concatenate(parts_y)
+        set_symmetric_axes(ax, x_all, y_all)
+        if filtered_df is not None and filtered_n is not None:
+            pts = load_cycle_points_for_trimmed_length(specimen_id, len(filtered_df))
+            if pts:
+                plot_characteristic_points(ax, filtered_n, pts, add_legend=True)
+        ax.set_xlabel(NORM_STRAIN_LABEL)
+        ax.set_ylabel(NORM_FORCE_LABEL)
+        apply_normalized_fu_axes(ax)
+        h, lab = ax.get_legend_handles_labels()
+        fig.legend(
+            h,
+            lab,
+            loc="outside upper center",
+            ncol=3,
+            fontsize=LEGEND_FONT_SIZE_SINGLE_AX_PT,
+            frameon=False,
+        )
+        ax.grid(True, alpha=0.3)
+        ax.axhline(0, color="k", linewidth=AXES_SPINE_LINEWIDTH_SINGLE_AX)
+        ax.axvline(0, color="k", linewidth=AXES_SPINE_LINEWIDTH_SINGLE_AX)
+        style_single_axis_spines(ax)
+        fig.savefig(out_dir / f"{specimen_id}.png", dpi=SAVE_DPI)
+        plt.close(fig)
 
 
 def plot_time_histories_scatter_one(
@@ -423,7 +430,7 @@ def plot_time_histories_scatter_one(
     ax_top.set_xlabel(r"Normalized position along drive (0 = first row, 1 = last)")
     apply_strain_fraction_ticks(ax_top, axis="y")
     ax_top.grid(True, alpha=0.3)
-    ax_top.axhline(0, color="k", linewidth=0.4)
+    ax_top.axhline(0, color="k", linewidth=AXES_SPINE_LINEWIDTH)
     h_top, lab_top = ax_top.get_legend_handles_labels()
     if h_top:
         ax_top.legend(
@@ -448,7 +455,7 @@ def plot_time_histories_scatter_one(
     ax_bot.set_xlabel("Step")
     apply_strain_fraction_ticks(ax_bot, axis="y")
     ax_bot.grid(True, alpha=0.3)
-    ax_bot.axhline(0, color="k", linewidth=0.4)
+    ax_bot.axhline(0, color="k", linewidth=AXES_SPINE_LINEWIDTH)
     h_bot, lab_bot = ax_bot.get_legend_handles_labels()
     if h_bot:
         ax_bot.legend(
@@ -533,7 +540,7 @@ def plot_all_specimens(
                     raw_n["Force_norm"],
                     color=COLOR_EXPERIMENTAL,
                     alpha=0.7,
-                    linewidth=0.6,
+                    linewidth=0.6 * HYSTERESIS_LINEWIDTH_SCALE,
                     label="Trimmed" if use_label else None,
                 )
                 if filtered_df is not None:
@@ -542,7 +549,7 @@ def plot_all_specimens(
                         filtered_n["Deformation_norm"],
                         filtered_n["Force_norm"],
                         color="tab:orange",
-                        linewidth=0.8,
+                        linewidth=0.8 * HYSTERESIS_LINEWIDTH_SCALE,
                         label="Filtered" if use_label else None,
                     )
             ax.set_xlim(-global_x_max, global_x_max)
@@ -553,8 +560,8 @@ def plot_all_specimens(
                     plot_characteristic_points(ax, filtered_n, pts, add_legend=False)
             ax.set_title(specimen_id)
             ax.grid(True, alpha=0.3)
-            ax.axhline(0, color="k", linewidth=0.4)
-            ax.axvline(0, color="k", linewidth=0.4)
+            ax.axhline(0, color="k", linewidth=AXES_SPINE_LINEWIDTH)
+            ax.axvline(0, color="k", linewidth=AXES_SPINE_LINEWIDTH)
             _set_axes_frame(ax)
             apply_normalized_fu_axes(ax)
         for j in range(n, nrow * ncol):
@@ -580,43 +587,44 @@ def plot_raw_before_after_trim_one(
     L_y = float(catalog_row["L_y_in"])
     before_n = normalize(raw_before, f_yc, A_c, L_y)
     after_n = normalize(raw_after, f_yc, A_c, L_y)
-    fig, ax = plt.subplots(figsize=SINGLE_FIGSIZE_IN, layout="constrained")
-    ax.plot(
-        before_n["Deformation_norm"],
-        before_n["Force_norm"],
-        label="Before trim",
-        color=COLOR_EXPERIMENTAL,
-        alpha=0.6,
-        linewidth=0.6,
-    )
-    ax.plot(
-        after_n["Deformation_norm"],
-        after_n["Force_norm"],
-        label="After trim",
-        color="tab:orange",
-        linewidth=0.8,
-    )
-    x_all = np.concatenate([before_n["Deformation_norm"].values, after_n["Deformation_norm"].values])
-    y_all = np.concatenate([before_n["Force_norm"].values, after_n["Force_norm"].values])
-    set_symmetric_axes(ax, x_all, y_all)
-    ax.set_xlabel(NORM_STRAIN_LABEL)
-    ax.set_ylabel(NORM_FORCE_LABEL)
-    apply_normalized_fu_axes(ax)
-    h, lab = ax.get_legend_handles_labels()
-    fig.legend(
-        h,
-        lab,
-        loc="outside upper center",
-        ncol=2,
-        fontsize=LEGEND_FONT_SIZE_SMALL_PT,
-        frameon=False,
-    )
-    ax.grid(True, alpha=0.3)
-    ax.axhline(0, color="k", linewidth=0.4)
-    ax.axvline(0, color="k", linewidth=0.4)
-    _set_axes_frame(ax)
-    fig.savefig(out_dir / f"{specimen_id}.png", dpi=SAVE_DPI)
-    plt.close(fig)
+    with single_axis_style_context():
+        fig, ax = plt.subplots(figsize=SINGLE_FIGSIZE_IN, layout="constrained")
+        ax.plot(
+            before_n["Deformation_norm"],
+            before_n["Force_norm"],
+            label="Before trim",
+            color=COLOR_EXPERIMENTAL,
+            alpha=0.6,
+            linewidth=0.6 * HYSTERESIS_LINEWIDTH_SCALE,
+        )
+        ax.plot(
+            after_n["Deformation_norm"],
+            after_n["Force_norm"],
+            label="After trim",
+            color="tab:orange",
+            linewidth=0.8 * HYSTERESIS_LINEWIDTH_SCALE,
+        )
+        x_all = np.concatenate([before_n["Deformation_norm"].values, after_n["Deformation_norm"].values])
+        y_all = np.concatenate([before_n["Force_norm"].values, after_n["Force_norm"].values])
+        set_symmetric_axes(ax, x_all, y_all)
+        ax.set_xlabel(NORM_STRAIN_LABEL)
+        ax.set_ylabel(NORM_FORCE_LABEL)
+        apply_normalized_fu_axes(ax)
+        h, lab = ax.get_legend_handles_labels()
+        fig.legend(
+            h,
+            lab,
+            loc="outside upper center",
+            ncol=2,
+            fontsize=LEGEND_FONT_SIZE_SINGLE_AX_PT,
+            frameon=False,
+        )
+        ax.grid(True, alpha=0.3)
+        ax.axhline(0, color="k", linewidth=AXES_SPINE_LINEWIDTH_SINGLE_AX)
+        ax.axvline(0, color="k", linewidth=AXES_SPINE_LINEWIDTH_SINGLE_AX)
+        style_single_axis_spines(ax)
+        fig.savefig(out_dir / f"{specimen_id}.png", dpi=SAVE_DPI)
+        plt.close(fig)
 
 
 def plot_time_histories_one(
@@ -663,7 +671,7 @@ def plot_time_histories_one(
         )
     ax_force.set_ylabel(NORM_FORCE_LABEL)
     ax_force.grid(True, alpha=0.3)
-    ax_force.axhline(0, color="k", linewidth=0.4)
+    ax_force.axhline(0, color="k", linewidth=AXES_SPINE_LINEWIDTH)
 
     ax_def.plot(
         x_raw,
@@ -689,7 +697,7 @@ def plot_time_histories_one(
     ax_def.set_ylabel(NORM_STRAIN_LABEL)
     apply_strain_fraction_ticks(ax_def, axis="y")
     ax_def.grid(True, alpha=0.3)
-    ax_def.axhline(0, color="k", linewidth=0.4)
+    ax_def.axhline(0, color="k", linewidth=AXES_SPINE_LINEWIDTH)
 
     # Mark characteristic points (indices in trimmed space); include zero_force (squares) on both subplots
     used_force = set()
@@ -826,14 +834,14 @@ def plot_raw_before_after_trim_all(
                 before_n["Force_norm"],
                 color=COLOR_EXPERIMENTAL,
                 alpha=0.6,
-                linewidth=0.5,
+                linewidth=0.5 * HYSTERESIS_LINEWIDTH_SCALE,
                 label="Before trim" if use_label else None,
             )
             ax.plot(
                 after_n["Deformation_norm"],
                 after_n["Force_norm"],
                 color="tab:orange",
-                linewidth=0.6,
+                linewidth=0.6 * HYSTERESIS_LINEWIDTH_SCALE,
                 label="After trim" if use_label else None,
             )
             if use_label:
@@ -842,8 +850,8 @@ def plot_raw_before_after_trim_all(
             ax.set_ylim(-global_y_max, global_y_max)
             ax.set_title(specimen_id)
             ax.grid(True, alpha=0.3)
-            ax.axhline(0, color="k", linewidth=0.4)
-            ax.axvline(0, color="k", linewidth=0.4)
+            ax.axhline(0, color="k", linewidth=AXES_SPINE_LINEWIDTH)
+            ax.axvline(0, color="k", linewidth=AXES_SPINE_LINEWIDTH)
             _set_axes_frame(ax)
             apply_normalized_fu_axes(ax)
         for j in range(n, nrow * ncol):
@@ -859,14 +867,14 @@ def plot_raw_before_after_trim_all(
                         [0],
                         color=COLOR_EXPERIMENTAL,
                         alpha=0.6,
-                        linewidth=1.5,
+                        linewidth=1.5 * HYSTERESIS_LINEWIDTH_SCALE,
                         label="Before trim",
                     ),
                     Line2D(
                         [0],
                         [0],
                         color="tab:orange",
-                        linewidth=1.5,
+                        linewidth=1.5 * HYSTERESIS_LINEWIDTH_SCALE,
                         label="After trim",
                     ),
                 ],
@@ -883,7 +891,7 @@ def main() -> None:
     PLOTS_FORCE_DEF_RAW_FILTERED.mkdir(parents=True, exist_ok=True)
     PLOTS_FORCE_DEF_TRIM_COMPARISON.mkdir(parents=True, exist_ok=True)
     PLOTS_TIME_HISTORIES.mkdir(parents=True, exist_ok=True)
-    catalog = pd.read_csv(CATALOG_PATH)
+    catalog = read_catalog(CATALOG_PATH)
     specimens = get_specimens_with_raw()
     if not specimens:
         print("No specimens with raw data found.")

@@ -19,6 +19,9 @@ from calibrate.calibration_paths import (  # noqa: E402
     PARAM_LIMITS_CSV,
     SET_ID_SETTINGS_CSV,
 )
+from calibrate.param_limits import read_param_limits_table  # noqa: E402
+from calibrate.set_id_settings import read_set_id_settings_table  # noqa: E402
+from specimen_catalog import read_catalog  # noqa: E402
 
 _REPO_ROOT = CALIBRATION_CONFIG_DIR.parent.parent
 
@@ -36,7 +39,15 @@ def _print_table(path: Path, max_rows: int) -> None:
         print(f"  (missing: {path})", file=sys.stderr)
         return
     try:
-        df = pd.read_csv(path, comment="#")
+        rp = path.resolve()
+        if rp == SET_ID_SETTINGS_CSV.resolve():
+            df = read_set_id_settings_table(path)
+        elif rp == BRB_SPECIMENS_CSV.resolve():
+            df = read_catalog(path)
+        elif rp == PARAM_LIMITS_CSV.resolve():
+            df = read_param_limits_table(path)
+        else:
+            df = pd.read_csv(path, comment="#")
     except pd.errors.EmptyDataError:
         print("  (no tabular rows after comment lines)")
         return

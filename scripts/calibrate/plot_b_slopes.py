@@ -1,6 +1,7 @@
 """
 Plot resampled force-deformation hysteresis with fitted b (hardening) slopes
-overlaid per cycle, and digitized scatter-cloud envelope figures -- **same output directory**
+overlaid per cycle (b-fit start from ``extract_bn_bp`` opposite-peak branches),
+and digitized scatter-cloud envelope figures -- **same output directory**
 (``results/plots/apparent_b/b_slopes/`` by default). Resampled and envelope-cloud figures both use
 ``{Name}.png`` (path-ordered PC* names and digitized cloud names are disjoint in practice).
 """
@@ -24,12 +25,15 @@ _SCRIPTS = _PROJECT_ROOT / "scripts"
 sys.path.insert(0, str(_SCRIPTS / "postprocess"))
 sys.path.insert(0, str(_SCRIPTS))
 from plot_dimensions import (
+    AXES_SPINE_LINEWIDTH_SINGLE_AX,
     COLOR_EXPERIMENTAL,
-    LEGEND_FONT_SIZE_SMALL_PT,
+    HYSTERESIS_LINEWIDTH_SCALE,
+    LEGEND_FONT_SIZE_SINGLE_AX_PT,
     SAVE_DPI,
     SINGLE_FIGSIZE_IN,
     configure_matplotlib_style,
-    style_axes_spines_and_ticks,
+    single_axis_style_context,
+    style_single_axis_spines,
 )
 from model.corotruss import compute_Q
 
@@ -48,9 +52,10 @@ from calibrate.digitized_unordered_bn import compute_envelope_bn_unordered  # no
 from extract_bn_bp import (
     E_ksi,
     CATALOG_PATH,
+    TRAILING_CYCLE_AMP_FRAC_OF_MAX_SEEN,
+    _TrailingCycleAmpGate,
     _segment_line_data,
-    _segment_peak_ok,
-    _segments_zero_to_peak,
+    _segments_opposite_peak_to_peak,
     get_specimens_with_resampled,
 )
 from specimen_catalog import (  # noqa: E402
@@ -71,6 +76,10 @@ FORCE_COL = "Force[kip]"
 # Match resampled overlays and scatter-cloud envelope diagnostics (b_slopes)
 COLOR_TENSION = "#CC3311"
 COLOR_COMPRESSION = "#0077BB"
+_B_SLOPES_LINEWIDTH_SCALE = 0.6
+# Circle markers: linear size vs prior (``scatter`` marker area ``s`` scales as this squared).
+_B_SLOPES_MARKER_LINEAR_SCALE = 0.6
+_B_SLOPES_SCATTER_AREA_SCALE = _B_SLOPES_MARKER_LINEAR_SCALE**2
 
 
 def plot_one_specimen(specimen_id: str, catalog_row: pd.Series, out_dir: Path) -> None:
@@ -106,67 +115,122 @@ def plot_one_specimen(specimen_id: str, catalog_row: pd.Series, out_dir: Path) -
     u_norm = u / L_y if L_y != 0 else u
     F_norm = F / fy_A if fy_A != 0 else F
 
-    segments = _segments_zero_to_peak(points)
-    segment_lines: list[tuple[bool, float, np.ndarray, np.ndarray]] = []  # (is_tension, b, u_line, F_line)
-    last_tension_peak: float | None = None
-    last_compression_peak: float | None = None
-    for start_idx, end_idx, _end_type in segments:
+    segments = _segments_opposite_peak_to_peak(points)
+    # One row per kept branch (opposite peak → peak): b-fit overlay data only.
+    kept_halfcycles: list[tuple[bool, float, np.ndarray, np.ndarray, int]] = []
+    trailing_gate = _TrailingCycleAmpGate(TRAILING_CYCLE_AMP_FRAC_OF_MAX_SEEN)
+    for seg_i, (start_idx, end_idx, end_type) in enumerate(segments):
         if end_idx >= n or start_idx < 0:
             continue
-        result = _segment_line_data(u, F, start_idx, end_idx, E_hat, A_sc, L_T, fy, L_y)
+        is_tension_seg = "max_def" in str(end_type)
+        result = _segment_line_data(
+            u,
+            F,
+            start_idx,
+            end_idx,
+            E_hat,
+            A_sc,
+            L_T,
+            fy,
+            L_y,
+            b_plastic_onset="half_elastic_secant",
+            points=points,
+            is_first_path_half_cycle=(seg_i == 0),
+            segment_is_tension=is_tension_seg,
+        )
         if result is None:
             continue
-        b, u_line, F_line, is_tension, _amp = result
-        peak_def = float(u_line[-1])
-        keep, last_tension_peak, last_compression_peak = _segment_peak_ok(
-            peak_def, is_tension, last_tension_peak, last_compression_peak
-        )
-        if not keep:
+        b, u_line, F_line, is_tension, amp, j_fit0 = result
+        if is_tension != is_tension_seg:
             continue
-        segment_lines.append((is_tension, b, u_line, F_line))
+        if not trailing_gate.keep(float(amp), is_tension=is_tension):
+            continue
+        kept_halfcycles.append((is_tension, b, u_line, F_line, int(j_fit0)))
 
     # Colors: experimental hysteresis from ``plot_dimensions``; model fits in red/blue (color-blind friendly)
     COLOR_TENSION = "#CC3311"    # red tone (fitted b_p; distinguishable from blue for protan/deutan)
     COLOR_COMPRESSION = "#0077BB" # blue tone (fitted b_n; Tol/colorblind-safe)
 
-    fig, ax = plt.subplots(figsize=SINGLE_FIGSIZE_IN, layout="constrained")
-    ax.plot(u_norm, F_norm, color=COLOR_EXPERIMENTAL, linewidth=1.2, label="Experimental", zorder=1)
-    for is_tension, b, u_line, F_line in segment_lines:
-        color = COLOR_TENSION if is_tension else COLOR_COMPRESSION
-        u_line_norm = u_line / L_y if L_y != 0 else u_line
-        F_line_norm = F_line / fy_A if fy_A != 0 else F_line
-        ax.plot(u_line_norm, F_line_norm, color=color, linewidth=1.5, alpha=0.9, linestyle="--", zorder=2)
-    ax.plot([], [], color=COLOR_TENSION, linewidth=2, linestyle="--", label=r"Fitted $b_p$")
-    ax.plot([], [], color=COLOR_COMPRESSION, linewidth=2, linestyle="--", label=r"Fitted $b_n$")
-    ax.set_xlabel(NORM_STRAIN_LABEL)
-    ax.set_ylabel(NORM_FORCE_LABEL)
-    # Same axis limits as raw_and_filtered (trimmed raw + filtered data)
-    raw_df = load_raw_valid(specimen_id)
-    if raw_df is not None and "Force[kip]" in raw_df.columns and "Deformation[in]" in raw_df.columns:
-        raw_n = normalize(raw_df, fy, A_sc, L_y)
-        filtered_n = normalize(df, fy, A_sc, L_y)
-        x_all = np.concatenate([raw_n["Deformation_norm"].values, filtered_n["Deformation_norm"].values])
-        y_all = np.concatenate([raw_n["Force_norm"].values, filtered_n["Force_norm"].values])
-        set_symmetric_axes(ax, x_all, y_all)
-    else:
-        set_symmetric_axes(ax, u_norm, F_norm)
-    apply_normalized_fu_axes(ax, pct_decimals=2)
-    h, lab = ax.get_legend_handles_labels()
-    fig.legend(
-        h,
-        lab,
-        loc="outside upper center",
-        ncol=3,
-        fontsize=LEGEND_FONT_SIZE_SMALL_PT,
-        frameon=False,
-    )
-    ax.grid(True, alpha=0.3)
-    ax.axhline(0, color="k", linewidth=0.5)
-    ax.axvline(0, color="k", linewidth=0.5)
-    style_axes_spines_and_ticks(ax)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    fig.savefig(out_dir / f"{specimen_id}.png", dpi=SAVE_DPI)
-    plt.close(fig)
+    lw = _B_SLOPES_LINEWIDTH_SCALE * HYSTERESIS_LINEWIDTH_SCALE
+    ms = _B_SLOPES_MARKER_LINEAR_SCALE
+    with single_axis_style_context():
+        fig, ax = plt.subplots(figsize=SINGLE_FIGSIZE_IN, layout="constrained")
+        ax.plot(u_norm, F_norm, color=COLOR_EXPERIMENTAL, linewidth=1.2 * lw, label="Experimental", zorder=1)
+        lw_bfit = 1.15 * lw
+        for is_tension, b, u_line, F_line, _j_fit0 in kept_halfcycles:
+            color = COLOR_TENSION if is_tension else COLOR_COMPRESSION
+            u_line_norm = u_line / L_y if L_y != 0 else u_line
+            F_line_norm = F_line / fy_A if fy_A != 0 else F_line
+            ax.plot(
+                u_line_norm,
+                F_line_norm,
+                color=color,
+                linewidth=lw_bfit,
+                alpha=0.9,
+                linestyle="--",
+                zorder=2,
+            )
+        for is_tension, _b, u_line, F_line, _j_fit0 in kept_halfcycles:
+            # First point of the dashed fit (regression line), not raw F[j]: the line is F = k_sh u + c
+            # and need not pass through the experimental (u[j], F[j]) at the onset index.
+            if u_line.size < 1 or F_line.size < 1 or L_y == 0 or fy_A == 0:
+                continue
+            color = COLOR_TENSION if is_tension else COLOR_COMPRESSION
+            x_on = float(u_line[0]) / L_y
+            y_on = float(F_line[0]) / fy_A
+            ax.plot(
+                x_on,
+                y_on,
+                marker="o",
+                linestyle="none",
+                markersize=4.5 * lw * ms,
+                markerfacecolor="white",
+                markeredgecolor=color,
+                markeredgewidth=1.4 * lw * ms,
+                zorder=2.8,
+            )
+        ax.plot(
+            [],
+            [],
+            marker="o",
+            linestyle="none",
+            markersize=5 * lw * ms,
+            markerfacecolor="white",
+            markeredgecolor="#333333",
+            markeredgewidth=1.4 * lw * ms,
+            label="Plastic onset",
+        )
+        ax.plot([], [], color=COLOR_TENSION, linewidth=lw_bfit, linestyle="--", label=r"Fitted $b_p$")
+        ax.plot([], [], color=COLOR_COMPRESSION, linewidth=lw_bfit, linestyle="--", label=r"Fitted $b_n$")
+        ax.set_xlabel(NORM_STRAIN_LABEL)
+        ax.set_ylabel(NORM_FORCE_LABEL)
+        # Same axis limits as raw_and_filtered (trimmed raw + filtered data)
+        raw_df = load_raw_valid(specimen_id)
+        if raw_df is not None and "Force[kip]" in raw_df.columns and "Deformation[in]" in raw_df.columns:
+            raw_n = normalize(raw_df, fy, A_sc, L_y)
+            filtered_n = normalize(df, fy, A_sc, L_y)
+            x_all = np.concatenate([raw_n["Deformation_norm"].values, filtered_n["Deformation_norm"].values])
+            y_all = np.concatenate([raw_n["Force_norm"].values, filtered_n["Force_norm"].values])
+            set_symmetric_axes(ax, x_all, y_all)
+        else:
+            set_symmetric_axes(ax, u_norm, F_norm)
+        apply_normalized_fu_axes(ax, pct_decimals=2)
+        h, lab = ax.get_legend_handles_labels()
+        fig.legend(
+            h,
+            lab,
+            loc="outside upper center",
+            ncol=2,
+            fontsize=LEGEND_FONT_SIZE_SINGLE_AX_PT,
+            frameon=False,
+        )
+        ax.grid(True, alpha=0.3)
+        ax.axhline(0, color="k", linewidth=AXES_SPINE_LINEWIDTH_SINGLE_AX)
+        ax.axvline(0, color="k", linewidth=AXES_SPINE_LINEWIDTH_SINGLE_AX)
+        style_single_axis_spines(ax)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        fig.savefig(out_dir / f"{specimen_id}.png", dpi=SAVE_DPI)
+        plt.close(fig)
 
 
 def _plot_digitized_unordered_envelope_normalized(
@@ -185,6 +249,7 @@ def _plot_digitized_unordered_envelope_normalized(
         return
     u_n = u / L_y
     F_n = F / fy_A
+    sa = _B_SLOPES_SCATTER_AREA_SCALE
     pl = diag.plastic_mask
     t_env = diag.tension_envelope_mask
     c_env = diag.compression_envelope_mask
@@ -195,7 +260,7 @@ def _plot_digitized_unordered_envelope_normalized(
         ax.scatter(
             u_n[neither_plastic],
             F_n[neither_plastic],
-            s=6,
+            s=6 * sa,
             alpha=0.22,
             c=COLOR_EXPERIMENTAL,
             label=r"$\sigma / f_y \leq 1.1$",
@@ -206,7 +271,7 @@ def _plot_digitized_unordered_envelope_normalized(
         ax.scatter(
             u_n[plastic_only],
             F_n[plastic_only],
-            s=10,
+            s=10 * sa,
             alpha=0.35,
             c=COLOR_EXPERIMENTAL,
             label=r"$\sigma / f_y > 1.1$",
@@ -214,7 +279,7 @@ def _plot_digitized_unordered_envelope_normalized(
             zorder=2,
         )
     # Envelope vertices: ~same scale as grey cloud markers (s=6 / 10); edge for visibility.
-    _s_env = 12
+    _s_env = 12 * sa
     if np.any(t_env):
         ax.scatter(
             u_n[t_env],
@@ -223,7 +288,7 @@ def _plot_digitized_unordered_envelope_normalized(
             alpha=0.95,
             c=COLOR_TENSION,
             edgecolors="0.15",
-            linewidths=0.35,
+            linewidths=0.35 * _B_SLOPES_MARKER_LINEAR_SCALE,
             label=r"$b_p$ envelope",
             zorder=5,
         )
@@ -235,7 +300,7 @@ def _plot_digitized_unordered_envelope_normalized(
             alpha=0.95,
             c=COLOR_COMPRESSION,
             edgecolors="0.15",
-            linewidths=0.35,
+            linewidths=0.35 * _B_SLOPES_MARKER_LINEAR_SCALE,
             label=r"$b_n$ envelope",
             zorder=5,
         )
@@ -251,7 +316,7 @@ def _plot_digitized_unordered_envelope_normalized(
             coef[0] * x_line + coef[1],
             color=COLOR_TENSION,
             linestyle="--",
-            linewidth=1.35,
+            linewidth=1.35 * _B_SLOPES_LINEWIDTH_SCALE * HYSTERESIS_LINEWIDTH_SCALE,
             alpha=0.85,
             zorder=4,
             label=rf"$b_p = {b_p:.4g}$",
@@ -267,7 +332,7 @@ def _plot_digitized_unordered_envelope_normalized(
             coef[0] * x_line + coef[1],
             color=COLOR_COMPRESSION,
             linestyle="--",
-            linewidth=1.35,
+            linewidth=1.35 * _B_SLOPES_LINEWIDTH_SCALE * HYSTERESIS_LINEWIDTH_SCALE,
             alpha=0.85,
             zorder=4,
             label=rf"$b_n = {b_n:.4g}$",
@@ -276,8 +341,8 @@ def _plot_digitized_unordered_envelope_normalized(
     ax.set_xlabel(NORM_STRAIN_LABEL)
     ax.set_ylabel(NORM_FORCE_LABEL)
     apply_normalized_fu_axes(ax, pct_decimals=2)
-    ax.axhline(0.0, color="k", linewidth=0.4, alpha=0.4)
-    ax.axvline(0.0, color="k", linewidth=0.4, alpha=0.4)
+    ax.axhline(0.0, color="k", linewidth=AXES_SPINE_LINEWIDTH_SINGLE_AX, alpha=0.4)
+    ax.axvline(0.0, color="k", linewidth=AXES_SPINE_LINEWIDTH_SINGLE_AX, alpha=0.4)
     ax.grid(True, alpha=0.3)
 
 
@@ -322,24 +387,25 @@ def plot_one_digitized_unordered(specimen_id: str, catalog_row: pd.Series, out_d
     u_norm = u / L_y
     F_norm = F / fy_A
 
-    fig, ax = plt.subplots(figsize=SINGLE_FIGSIZE_IN, layout="constrained")
-    _plot_digitized_unordered_envelope_normalized(
-        ax, u, F, diag, b_p=b_p, b_n=b_n, L_y=L_y, fy_A=fy_A
-    )
-    set_symmetric_axes(ax, u_norm, F_norm)
-    h, lab = ax.get_legend_handles_labels()
-    fig.legend(
-        h,
-        lab,
-        loc="outside upper center",
-        ncol=3,
-        fontsize=LEGEND_FONT_SIZE_SMALL_PT,
-        frameon=False,
-    )
-    style_axes_spines_and_ticks(ax)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    fig.savefig(out_dir / f"{specimen_id}.png", dpi=SAVE_DPI)
-    plt.close(fig)
+    with single_axis_style_context():
+        fig, ax = plt.subplots(figsize=SINGLE_FIGSIZE_IN, layout="constrained")
+        _plot_digitized_unordered_envelope_normalized(
+            ax, u, F, diag, b_p=b_p, b_n=b_n, L_y=L_y, fy_A=fy_A
+        )
+        set_symmetric_axes(ax, u_norm, F_norm)
+        h, lab = ax.get_legend_handles_labels()
+        fig.legend(
+            h,
+            lab,
+            loc="outside upper center",
+            ncol=3,
+            fontsize=LEGEND_FONT_SIZE_SINGLE_AX_PT,
+            frameon=False,
+        )
+        style_single_axis_spines(ax)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        fig.savefig(out_dir / f"{specimen_id}.png", dpi=SAVE_DPI)
+        plt.close(fig)
     return True
 
 
