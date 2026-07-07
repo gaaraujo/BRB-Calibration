@@ -8,6 +8,7 @@ Run everything from the **repository root** unless a script docstring says other
 |--------|------|
 | `postprocess/` | Experimental CSV -> cycle JSON -> filtered -> resampled; QA plots. Imports are often **flat** (`import load_raw`) after `sys.path` inserts this directory--see each file's imports. |
 | `calibrate/` | Apparent $b$, initial parameters, L-BFGS-B optimize, generalized eval (incl. digitized unordered F–u). Typically adds `scripts/` and `scripts/postprocess/` to `sys.path` to reach `specimen_catalog` and `model`. |
+| `calibrate_single/` | One-off per-specimen SteelMPF L-BFGS-B + overlays; edit `input.csv` for seeds, bounds, and loss weights (not wired into `run.ps1`). |
 | `model/` | OpenSees corotruss + geometry (`corotruss.py`, `brace_geometry.py`). Imported as `from model.corotruss import ...` or `from calibrate.*` depending on caller. |
 
 ## Data flow (ordered / path specimens)
@@ -40,6 +41,7 @@ flowchart LR
 | Goal | Where to change |
 |------|-----------------|
 | Add a specimen | `config/calibration/BRB-Specimens.csv` + place CSVs under `data/raw/{Name}/` (see root README) |
+| Calibrate + plot one specimen | Edit `scripts/calibrate_single/input.csv`, then `scripts/calibrate_single/calibrate_one_specimen.py <Name> --force-deformation <abs path>`; optional `--prepare-data` |
 | Steel + apparent $b$ seeds per `set_id` | `config/calibration/set_id_settings.csv` (`E,R0,cR1,cR2,a1–a4,b_p,b_n`; `b_p`/`b_n` as number or median/mean/q1/q3/min/max); `--set-id-settings` on `build_initial_brb_parameters.py` (see root README) |
 | L-BFGS box limits (`PARAMS_TO_OPTIMIZE`) | `config/calibration/params_limits.csv`; `--param-limits` on `optimize_brb_mse.py` / `optimize_generalized_brb_mse.py` (`calibrate/param_limits.py`) |
 | Landmark + energy objective weights, amplitude $w_c$ | `config/calibration/set_id_settings.csv` (per `set_id` columns); `--amplitude-weights` / `--no-amplitude-weights` on optimize and eval scripts |

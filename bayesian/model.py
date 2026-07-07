@@ -3,10 +3,7 @@ from pathlib import Path
 
 import numpy as np
 
-try:
-    import opensees as ops
-except ImportError:
-    import openseespy.opensees as ops
+import openseespy.opensees as ops
 
 from params import *
 
@@ -74,9 +71,6 @@ def run_analysis(target_displacement=None):
     ops.fix(2, 0, 1)
 
     mat_tag = 1
-    fup = 4.0 * fyp
-    fun = 4.0 * fyn
-    Ru0 = 5.0
     ops.uniaxialMaterial("SteelMPF", mat_tag, fyp, fyn, KF * E0, bp, bn, R0, cR1, cR2, a1, a2, a3, a4)
 
     ele_tag = 1

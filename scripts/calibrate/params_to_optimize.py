@@ -8,7 +8,9 @@ from __future__ import annotations
 
 from calibrate.steel_model import (
     STEEL4_ISO_KEYS,
+    STEEL4_SIM_KEYS,
     STEEL_MODEL_STEEL4,
+    STEELMPF_SIM_KEYS,
     normalize_steel_model,
 )
 
@@ -17,35 +19,15 @@ from calibrate.steel_model import (
 # Alternate choices (keep one active):
 # PARAMS_TO_OPTIMIZE = ["fyp", "fyn", "b_p", "b_n", "R0", "cR1", "cR2", "a1", "a3"]
 # PARAMS_TO_OPTIMIZE = ["b_p", "b_n", "R0", "cR1", "cR2", "a1", "a3"]
-# SteelMPF tail (ratios vs fyp/fyn; box limits in params_limits.csv): "fup_ratio", "fun_ratio", "Ru0"
 PARAMS_TO_OPTIMIZE = ["R0", "cR1", "cR2", "a1", "a3"]
 # PARAMS_TO_OPTIMIZE = ["a1", "a3"]
 
-# Columns after ID, Name, set_id, steel_model passed to ``run_simulation`` (float block only).
-SIM_PARAMS_FROM_ROW: tuple[str, ...] = (
-    "L_T",
-    "L_y",
-    "A_sc",
-    "A_t",
-    "fyp",
-    "fyn",
-    "E",
-    "b_p",
-    "b_n",
-    "R0",
-    "cR1",
-    "cR2",
-    "a1",
-    "a2",
-    "a3",
-    "a4",
-    "fup_ratio",
-    "fun_ratio",
-    "Ru0",
-    *STEEL4_ISO_KEYS,
+# Widest parameter-row float block (union of SteelMPF and Steel4 simulation keys).
+SIM_PARAMS_FROM_ROW: tuple[str, ...] = tuple(
+    dict.fromkeys([*STEELMPF_SIM_KEYS, *STEEL4_SIM_KEYS])
 )
 
-# When a legacy parameters CSV omits optional columns, fill before simulation / optimization.
+# When a parameters CSV omits optional columns, fill before simulation / optimization.
 SIM_PARAM_FILL_DEFAULTS: dict[str, float] = {
     "E": 29000.0,
     "R0": 20.0,
@@ -55,9 +37,6 @@ SIM_PARAM_FILL_DEFAULTS: dict[str, float] = {
     "a2": 1.0,
     "a3": 0.04,
     "a4": 1.0,
-    "fup_ratio": 4.0,
-    "fun_ratio": 4.0,
-    "Ru0": 5.0,
     "b_ip": 0.01,
     "rho_ip": 2.0,
     "b_lp": 0.001,
@@ -76,9 +55,6 @@ PARAMS_IN_SUMMARY_TABLES_STEELMPF: tuple[str, ...] = (
     *PARAMS_TO_OPTIMIZE,
     "a2",
     "a4",
-    "fup_ratio",
-    "fun_ratio",
-    "Ru0",
 )
 PARAMS_IN_SUMMARY_TABLES_STEEL4: tuple[str, ...] = (*PARAMS_IN_SUMMARY_TABLES_STEELMPF, *STEEL4_ISO_KEYS)
 

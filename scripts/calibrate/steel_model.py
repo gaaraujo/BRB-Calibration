@@ -44,11 +44,32 @@ STEEL4_ISO_KEYS: tuple[str, ...] = ("b_ip", "rho_ip", "b_lp", "R_i", "l_yp", "b_
 # Subset used by ``clamp_steel4_isotropic_slopes`` / CSV precision for small slope magnitudes.
 STEEL4_ISO_SLOPE_KEYS: tuple[str, ...] = ("b_ip", "b_lp", "b_ic", "b_lc")
 
-# SteelMPF-only isotropic + decay parameters (ignored when simulating Steel4).
-STEELMPF_ISO_KEYS: tuple[str, ...] = ("a1", "a2", "a3", "a4", "fup_ratio", "fun_ratio", "Ru0")
+# SteelMPF isotropic parameters (ignored when simulating Steel4). Stock OpenSeesPy API through a4 only.
+STEELMPF_ISO_KEYS: tuple[str, ...] = ("a1", "a2", "a3", "a4")
 
 # Shared kinematic / modulus seeds in CSV for both models.
 SHARED_STEEL_KEYS: tuple[str, ...] = ("E", "R0", "cR1", "cR2")
+
+BRACE_GEOMETRY_SIM_KEYS: tuple[str, ...] = ("L_T", "L_y", "A_sc", "A_t", "fyp", "fyn")
+SHARED_SIM_KEYS: tuple[str, ...] = (
+    *BRACE_GEOMETRY_SIM_KEYS,
+    "E",
+    "b_p",
+    "b_n",
+    "R0",
+    "cR1",
+    "cR2",
+)
+STEELMPF_SIM_KEYS: tuple[str, ...] = (*SHARED_SIM_KEYS, *STEELMPF_ISO_KEYS)
+STEEL4_SIM_KEYS: tuple[str, ...] = (*SHARED_SIM_KEYS, *STEEL4_ISO_KEYS)
+
+
+def sim_param_keys_for_model(steel_model: object) -> tuple[str, ...]:
+    """OpenSees ``run_simulation`` kwargs for one ``steel_model`` (no cross-model placeholders)."""
+    sm = normalize_steel_model(steel_model)
+    if sm == STEEL_MODEL_STEEL4:
+        return STEEL4_SIM_KEYS
+    return STEELMPF_SIM_KEYS
 
 
 def normalize_steel_model(raw: object) -> str:

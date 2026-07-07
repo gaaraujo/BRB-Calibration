@@ -8,7 +8,7 @@ Build ``results/calibration/individual_optimize/initial_brb_parameters.csv`` fro
 
 ``steel_model`` selects ``steelmpf`` or ``steel4``.
 The CSV is **wide**: kinematic columns ``E``, ``b_p``, ``b_n``, ``R0``, ``cR1``, ``cR2`` apply to all;
-``a1``–``a4`` plus SteelMPF tail ``fup_ratio``, ``fun_ratio``, ``Ru0`` (ultimate stress ratios vs ``fyp``/``fyn``) for ``steelmpf``; ``b_ip`` … ``b_lc`` only for Steel4. Blank cells fall back to defaults.
+``a1``–``a4`` for ``steelmpf``; ``b_ip`` … ``b_lc`` only for Steel4. Blank cells fall back to defaults.
 
 Geometry and ``fyp`` / ``fyn`` always come from the specimen catalog. Columns ``b_p`` and ``b_n`` are each
 either a **numeric** literal or a **stat name** (case-insensitive) referencing ``specimen_apparent_bn_bp.csv``:
@@ -77,9 +77,6 @@ STEEL_DEFAULT: dict[str, float] = {
     "a2": 1.0,
     "a3": 0.04,
     "a4": 1.0,
-    "fup_ratio": 4.0,
-    "fun_ratio": 4.0,
-    "Ru0": 5.0,
     "b_ip": 0.01,
     "rho_ip": 2.0,
     "b_lp": 0.001,
@@ -644,9 +641,6 @@ OUT_COLS = [
     "a2",
     "a3",
     "a4",
-    "fup_ratio",
-    "fun_ratio",
-    "Ru0",
     *STEEL4_ISO_KEYS,
 ]
 
@@ -817,9 +811,6 @@ def build_initial_rows(
                 "a2": steel["a2"],
                 "a3": steel["a3"],
                 "a4": steel["a4"],
-                "fup_ratio": steel["fup_ratio"],
-                "fun_ratio": steel["fun_ratio"],
-                "Ru0": steel["Ru0"],
             }
             for k in STEEL4_ISO_KEYS:
                 row_d[k] = steel[k]

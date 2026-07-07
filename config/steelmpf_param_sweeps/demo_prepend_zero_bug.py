@@ -1,15 +1,12 @@
 """SteelMPF zeroLength demo: Path series with vs without ``-prependZero``. Writes ``demo_prepend_zero_bug.png``.
 
-Uses the same post-``a4`` tail as ``model.material.ops_BRB_material`` (``-ult``, then ``fup``, ``fun``, ``Ru0``).
+Uses stock OpenSeesPy ``SteelMPF`` (through ``a4`` only), same as ``model.material.ops_BRB_material``.
 """
 
 import matplotlib.pyplot as plt
 import numpy as np
 
-try:
-    import opensees as ops
-except ImportError:
-    import openseespy.opensees as ops
+import openseespy.opensees as ops
 
 E = 29000.0
 FY = 50.0
@@ -22,9 +19,6 @@ A1 = 0.04
 A2 = 1.0
 A3 = 0.04
 A4 = 1.0
-fup = 4.0 * FY
-fun = 4.0 * FY
-Ru0 = 5.0
 EPS_Y = FY / E
 
 EPS_PEAK = 2.0 * EPS_Y
@@ -54,10 +48,6 @@ def run_simulation(disp_history, prepend_zero=False):
         A2,
         A3,
         A4,
-        "-ult",
-        fup,
-        fun,
-        Ru0,
     )
     ops.element("zeroLength", 1, 1, 2, "-mat", 1, "-dir", 1)
 

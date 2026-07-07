@@ -9,10 +9,7 @@ from __future__ import annotations
 
 import numpy as np
 
-try:
-    import opensees as ops
-except ImportError:
-    import openseespy.opensees as ops
+import openseespy.opensees as ops
 
 from calibrate.steel_model import (
     STEEL_MODEL_STEEL4,
@@ -49,10 +46,6 @@ def run_simulation(
     a2: float = 1.0,
     a3: float = 0.0,
     a4: float = 1.0,
-    # SteelMPF post-a4: ratios × fyp/fyn → ``fup``/``fun``; ``-ult`` then ``fup``, ``fun``, ``Ru0`` (ignored for Steel4).
-    fup_ratio: float = 4.0,
-    fun_ratio: float = 4.0,
-    Ru0: float = 5.0,
     # Steel4 ``-iso`` branch (ignored for SteelMPF)
     b_ip: float = 0.01,
     rho_ip: float = 2.0,
@@ -116,8 +109,6 @@ def run_simulation(
             b_lc=float(sl["b_lc"]),
         )
     elif sm == STEEL_MODEL_STEELMPF:
-        fup = float(fup_ratio) * float(fyp)
-        fun = float(fun_ratio) * float(fyn)
         brb_mat_tag = ops_BRB_material(
             fyp=fyp,
             fyn=fyn,
@@ -131,9 +122,6 @@ def run_simulation(
             a2=a2,
             a3=a3,
             a4=a4,
-            fup=fup,
-            fun=fun,
-            Ru0=Ru0,
         )
     else:
         raise ValueError(

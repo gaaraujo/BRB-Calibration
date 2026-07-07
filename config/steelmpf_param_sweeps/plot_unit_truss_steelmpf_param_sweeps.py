@@ -10,8 +10,6 @@ from the catalog. When ``OPTIMIZED_BRB_PARAMETERS_SET_ID`` is set, a matching **
 ``results/calibration/individual_optimize/optimized_brb_parameters.csv`` overwrites classic SteelMPF fields only
 (``E``, ``b_p``, ``b_n``, ``R0``, ``cR1``, ``cR2``, ``a1``–``a4``, ``fyp``, ``fyn``; see ``_apply_optimized_brb_parameters_steel``).
 Optional **``SPECIMEN_STEEL_OVERRIDES``** merges last.
-Rows in ``generalized_brb_parameters.csv`` may omit ``fup_ratio``, ``fun_ratio``, and ``Ru0``; those default to
-4, 4, and 5 when building ``DEFAULT_STEEL``.
 Experimental peak ``n_peak = max|δ|/(L_y ε_y)`` uses the same specimen catalog row (resolved F--u CSV).
 
 Core-referenced displacement ``u = n * eps_y * L_y`` (horizontal axis ``delta / (L_y * eps_y)``, i.e. ``n``).
@@ -31,9 +29,7 @@ If experimental F--u cannot be resolved, falls back to ``n_peak=10``, ``n_half=5
 - One figure **sweep_LyLt.png**: vary ``L_y/L_T`` over ``LY_OVER_LT_VALUES``; ``A_t/A_sc`` fixed at default.
 - One figure **sweep_AtAsc.png**: vary ``A_t/A_sc`` over ``AT_OVER_ASC_VALUES``; ``L_y/L_T`` fixed at default.
 
-SteelMPF: varies one parameter at a time (``STEEL_PARAM_EXPLORATIONS``) at default geometry, including
-post-``a4`` parameters ``fup_ratio``, ``fun_ratio``, and ``Ru0`` (via ``model.corotruss``: ``-ult`` then ``fup``, ``fun``, ``Ru0``).
-``sweep_Ru0.png`` pins ``f_{\mathrm{up}}/f_{\mathrm{yp}}`` to ``RU0_SWEEP_FUP_RATIO`` (default 2.0) on every displacement driver.
+SteelMPF: varies one parameter at a time (``STEEL_PARAM_EXPLORATIONS``) at default geometry (stock API through ``a4``).
 
 On every figure (for each load protocol): **experimental** ``F``--``δ`` from the same resolved CSV as the peak-strain
 logic, plotted as subsampled scatter (``σ/f_y`` vs ``δ/(L_y ε_y)``) for reference alongside the swept model curves.
@@ -50,9 +46,8 @@ Each sweep subfolder writes a prescribed-$\delta$ diagnostic with ``x`` markers:
 ``displacement_vs_cumulative_deformation.png`` ($\delta$ vs cumulative $\sum|\Delta\delta|$). Subfolders listed in
 ``DISPLACEMENT_STEP_INDEX_SUBDIRS`` write ``displacement_vs_step.png`` ($\delta$ vs zero-based step index) instead.
 ``resampled_eval_history`` plots **only** that subfolder's drive (same as ``load_*``); no second history on the
-cumulative-deformation diagnostic. ``resampled_eval_history`` also writes ``sweep_a3_fup_ratio_<tag>.png``:
-``a3`` sweep at fixed ``f_{\mathrm{up}}/f_{\mathrm{yp}}`` (``RESAMPLED_EVAL_SWEEP_A3_EXTRA_FUP_RATIO``), using
-``RESAMPLED_EVAL_SWEEP_A3_EXTRA_VALUES`` (through 0.08 by default), not the shorter ``sweep_a3.png`` grid.
+cumulative-deformation diagnostic. ``resampled_eval_history`` also writes ``sweep_a3_extra.png``:
+``a3`` sweep on an extended grid (``RESAMPLED_EVAL_SWEEP_A3_EXTRA_VALUES``, through 0.08 by default), not the shorter ``sweep_a3.png`` grid.
 If ``RESAMPLED_EVAL_SWEEP_A3_EXTRA_BP_BN`` is set, a second PNG uses the same sweep with that ``(b_p, b_n)``.
 
 PNG layout: ``<out-dir>/<protocol>/sweep_<name>.png`` (steel keys, ``LyLt``, ``AtAsc``, ``sweep_Dsample.png``,
@@ -151,9 +146,6 @@ DEFAULT_STEEL: dict[str, float] = {
     "a2": 1.0,
     "a3": 0.0347035,
     "a4": 1.0,
-    "fup_ratio": 4.0,
-    "fun_ratio": 4.0,
-    "Ru0": 5.0,
 }
 
 _FALLBACK_N_PEAK = 10.0
@@ -177,9 +169,6 @@ _GENERIC_STEEL_FALLBACK: dict[str, float] = {
     "a2": 1.0,
     "a3": 0.04,
     "a4": 1.0,
-    "fup_ratio": 4.0,
-    "fun_ratio": 4.0,
-    "Ru0": 5.0,
 }
 _GEOMETRY_TOL_IN = 0.05
 # Subsample experimental points for scatter (full series can be 1e4+).
@@ -195,11 +184,9 @@ _CUM_DEF_MARKER_KW: dict[str, object] = {
 
 # Output folder for sweeps driven by the same ``Deformation[in]`` as ``run_eval_params_metrics.py``.
 RESAMPLED_EVAL_HISTORY_SUBDIR = "resampled_eval_history"
-# Separate ``sweep_a3_fup_ratio_<tag>.png`` in ``resampled_eval_history`` only (``a3`` sweep at this ``fup_ratio``).
-RESAMPLED_EVAL_SWEEP_A3_EXTRA_FUP_RATIO: float = 2.0
-# ``a3`` values for that figure only (extends through 0.08; other sweeps still use ``STEEL_PARAM_EXPLORATIONS``).
+# Extended ``a3`` grid for ``sweep_a3_extra.png`` in ``resampled_eval_history`` only.
 RESAMPLED_EVAL_SWEEP_A3_EXTRA_VALUES: tuple[float, ...] = (0.0, 0.02, 0.04, 0.06, 0.08)
-# If not ``None``, also write ``sweep_a3_fup_ratio_<tag>_bp<...>_bn<...>.png`` (same ``a3`` grid + ``fup_ratio``).
+# If not ``None``, also write ``sweep_a3_extra_bp<...>_bn<...>.png`` (same ``a3`` grid + ``(b_p, b_n)``).
 RESAMPLED_EVAL_SWEEP_A3_EXTRA_BP_BN: tuple[float, float] | None = (0.005, 0.02)
 
 # Displacement increment per OpenSees step (approx.): ``D_\mathrm{sample} = f\,L_y\,\varepsilon_y`` (inch).
@@ -224,7 +211,7 @@ class LoadProtocol:
     waypoint_mults: tuple[float, ...]
 
 
-# Individual-optimize columns merged into sweeps: classic SteelMPF only (no ``deltap``/``deltan``/``cb*``, no ``fup_ratio``/``fun_ratio``/``Ru0``).
+# Individual-optimize columns merged into sweeps: classic SteelMPF only (through ``a4``; no ``deltap``/``deltan``/``cb*``).
 _OPTIMIZED_STEEL_KEYS: tuple[str, ...] = (
     "E",
     "b_p",
@@ -251,8 +238,7 @@ def _apply_optimized_brb_parameters_steel(
     """
     Overlay ``optimized_brb_parameters.csv`` steel columns onto ``steel`` for a steelmpf row.
 
-    Only keys present and finite in the CSV are copied. Does not read decay deltas, ``cb*``, or ``fup_ratio`` /
-    ``fun_ratio`` / ``Ru0`` — those stay from generalized defaults or generic fallback.
+    Only keys present and finite in the CSV are copied. Does not read decay deltas or ``cb*``.
 
     Returns ``(updated_steel, n_keys_merged)`` for logging (``n_keys_merged`` is 0 if nothing was applied).
     """
@@ -400,11 +386,6 @@ def configure_specimen(
             "a3": float(g["a3"]),
             "a4": float(g["a4"]),
         }
-        for _dk, _dv in (("fup_ratio", 4.0), ("fun_ratio", 4.0), ("Ru0", 5.0)):
-            if _dk not in g.index or pd.isna(g[_dk]):
-                DEFAULT_STEEL[_dk] = _dv
-            else:
-                DEFAULT_STEEL[_dk] = float(g[_dk])
 
         steel_note = gpath.name
 
@@ -630,9 +611,6 @@ AT_OVER_ASC_VALUES: tuple[float, ...] = (3.0, 5.0, 10.0)
 # Matplotlib linestyle for each curve in a sweep (solid, dashed, dash-dot).
 SWEEP_LINE_STYLES: tuple[str, ...] = ("-", "--", "-.")
 
-# When sweeping ``Ru0`` only: hold ``fup_ratio`` at this value (``fun_ratio`` still from ``DEFAULT_STEEL``).
-RU0_SWEEP_FUP_RATIO = 2.0
-
 STEEL_PARAM_EXPLORATIONS: dict[str, list[float]] = {
     "R0": [5.0, 10.0, 20.0],
     "cR1": [0.875, 0.90, 0.925],
@@ -641,9 +619,6 @@ STEEL_PARAM_EXPLORATIONS: dict[str, list[float]] = {
     "a2": [1.0, 5.0, 10.0],
     "a3": [0.0, 0.02, 0.04],
     "a4": [1.0, 5.0, 10.0],
-    "fup_ratio": [1.5, 1.75, 2.0, 4.0],
-    "fun_ratio": [1.5, 1.75, 2.0, 4.0],
-    "Ru0": [1.0, 2.0, 3.0, 5.0, 10.0],
 }
 
 
@@ -657,9 +632,6 @@ def _steel_math_name(param: str) -> str:
         "a2": r"a_2",
         "a3": r"a_3",
         "a4": r"a_4",
-        "fup_ratio": r"f_{\mathrm{up}}/f_{\mathrm{yp}}",
-        "fun_ratio": r"f_{\mathrm{un}}/f_{\mathrm{yn}}",
-        "Ru0": r"R_{\mathrm{u0}}",
     }.get(param, param)
 
 
@@ -697,10 +669,6 @@ def _fmt_legend_val(param: str, v: float) -> str:
         return f"{v:.2f}"
     if param in ("a2", "a4"):
         return f"{v:.0f}" if abs(v - round(v)) < 1e-9 else f"{v:g}"
-    if param in ("fup_ratio", "fun_ratio"):
-        return f"{v:.2f}"
-    if param == "Ru0":
-        return f"{v:.2f}" if abs(v - round(v)) >= 1e-9 else f"{v:.0f}"
     return f"{v:g}"
 
 
@@ -871,10 +839,6 @@ def _format_steel_key_chunk(d: dict[str, float], key: str) -> str:
         return rf"${sym}={val:.4g}$"
     if key in ("a2", "a4"):
         return rf"${sym}={val:.1f}$"
-    if key in ("fup_ratio", "fun_ratio"):
-        return rf"${sym}={val:.2f}$"
-    if key == "Ru0":
-        return rf"${sym}={val:.2f}$"
     return rf"${sym}={val:.1f}$"
 
 
@@ -897,10 +861,6 @@ def _footer_steel_lines_through_cr2(
             continue
         line2.append(_format_steel_key_chunk(d, key))
     for key in ("a1", "a2", "a3", "a4"):
-        if steel_exclude is not None and key == steel_exclude:
-            continue
-        line3.append(_format_steel_key_chunk(d, key))
-    for key in ("fup_ratio", "fun_ratio", "Ru0"):
         if steel_exclude is not None and key == steel_exclude:
             continue
         line3.append(_format_steel_key_chunk(d, key))
@@ -939,9 +899,6 @@ def run_brb(
         a2=steel["a2"],
         a3=steel["a3"],
         a4=steel["a4"],
-        fup_ratio=float(steel.get("fup_ratio", 4.0)),
-        fun_ratio=float(steel.get("fun_ratio", 4.0)),
-        Ru0=float(steel.get("Ru0", 5.0)),
     )
 
 
@@ -1491,9 +1448,6 @@ def write_sweep_pngs_for_displacement(
 
     for param, values in STEEL_PARAM_EXPLORATIONS.items():
         out_path = pdir / f"sweep_{param}.png"
-        ru0_fup: dict[str, float] | None = (
-            {"fup_ratio": float(RU0_SWEEP_FUP_RATIO)} if param == "Ru0" else None
-        )
         plot_sweep_figure(
             out_path,
             param,
@@ -1507,34 +1461,31 @@ def write_sweep_pngs_for_displacement(
             A_t=A_t_d,
             at_over_asc=at_d,
             exp_xy=exp_xy,
-            fixed_steel_overrides=ru0_fup,
         )
         print(f"Wrote {out_path}")
 
     if subdir == RESAMPLED_EVAL_HISTORY_SUBDIR and RESAMPLED_EVAL_SWEEP_A3_EXTRA_VALUES:
-        fr = float(RESAMPLED_EVAL_SWEEP_A3_EXTRA_FUP_RATIO)
-        fr_tag = str(int(fr)) if abs(fr - round(fr)) < 1e-9 else str(fr).replace(".", "p")
 
         def _sweep_fname_float_token(x: float) -> str:
             t = f"{float(x):.4f}".rstrip("0").rstrip(".")
             return t.replace(".", "p").replace("-", "m")
 
-        a3_extra_scenarios: list[tuple[str, dict[str, float]]] = [
-            (f"sweep_a3_fup_ratio_{fr_tag}.png", {"fup_ratio": fr}),
+        a3_extra_scenarios: list[tuple[str, dict[str, float] | None]] = [
+            ("sweep_a3_extra.png", None),
         ]
         if RESAMPLED_EVAL_SWEEP_A3_EXTRA_BP_BN is not None:
             bp, bn = (float(RESAMPLED_EVAL_SWEEP_A3_EXTRA_BP_BN[0]), float(RESAMPLED_EVAL_SWEEP_A3_EXTRA_BP_BN[1]))
             a3_extra_scenarios.append(
                 (
-                    f"sweep_a3_fup_ratio_{fr_tag}_bp{_sweep_fname_float_token(bp)}_bn{_sweep_fname_float_token(bn)}.png",
-                    {"fup_ratio": fr, "b_p": bp, "b_n": bn},
+                    f"sweep_a3_extra_bp{_sweep_fname_float_token(bp)}_bn{_sweep_fname_float_token(bn)}.png",
+                    {"b_p": bp, "b_n": bn},
                 )
             )
 
         for fname, overrides in a3_extra_scenarios:
-            out_a3_fup = pdir / fname
+            out_a3_extra = pdir / fname
             plot_sweep_figure(
-                out_a3_fup,
+                out_a3_extra,
                 "a3",
                 RESAMPLED_EVAL_SWEEP_A3_EXTRA_VALUES,
                 disp,
@@ -1548,7 +1499,7 @@ def write_sweep_pngs_for_displacement(
                 exp_xy=exp_xy,
                 fixed_steel_overrides=overrides,
             )
-            print(f"Wrote {out_a3_fup}")
+            print(f"Wrote {out_a3_extra}")
 
     p_ly = pdir / "sweep_LyLt.png"
     plot_ly_lt_sweep_figure(p_ly, disp, strain_norm_ly, exp_xy)

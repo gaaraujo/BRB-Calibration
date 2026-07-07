@@ -390,7 +390,12 @@ Options: `--no-by-set-id`, `--specimen <Name>`.
 ### Other One-Off Commands
 
 ```bash
-# Single specimen
+# Single specimen (edit scripts/calibrate_single/input.csv, then run)
+python scripts/calibrate_single/calibrate_one_specimen.py <Name> \
+  --force-deformation /abs/path/to/force_deformation.csv \
+  --prepare-data
+
+# Single specimen (optimize only, full pipeline config)
 python scripts/calibrate/optimize_brb_mse.py \
   --specimen <Name> --initial-params <path> --output <path>
 
@@ -485,7 +490,7 @@ Regenerated outputs can be removed while preserving **`data/raw/`** and everythi
 .\clean_outputs.ps1     # Windows
 ```
 
-This deletes `data/filtered`, `resampled`, `cycle_points_original`, `cycle_points_resampled`, all of **`results/plots/`** and **`results/calibration/`**, and **all contents** of **`summary_statistics/`** (parameter summaries, eval reports, and any other files the pipeline writes there). It does **not** remove **`docs/readme/`** snapshots.
+This deletes `data/filtered`, `resampled`, `cycle_points_original`, `cycle_points_resampled`, all of **`results/plots/`** (postprocess QA, `apparent_b/`, `calibration/individual_optimize/` overlays and debug figures, `calibration/single_specimen/`, etc.) and **`results/calibration/`** (individual/generalized optimize, `single_specimen/`, `specimen_apparent_bn_bp.csv`, reports), and **all contents** of **`summary_statistics/`**. It does **not** remove **`docs/readme/`** snapshots, **`run_snapshots/`**, or repo-root demo PNGs.
 
 **Archive before a clean or alternate run:** zip everything the clean script would wipe (processed `data/*` subtrees, full `results/plots/` and `results/calibration/`, and `summary_statistics/*`) into a single timestamped file under `run_snapshots/`:
 

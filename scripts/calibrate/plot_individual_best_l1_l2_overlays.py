@@ -881,7 +881,7 @@ def _render_best_l1_l2_overlays_for_model(
     ]
     sm_tab = normalize_steel_model(steel_model)
     _pcore_shared = ["b_p", "b_n", "R0", "cR1", "cR2", "a1", "a2", "a3", "a4"]
-    _pcore_steelmpf_tail = ["fup_ratio", "fun_ratio", "Ru0"]
+    _pcore_steelmpf_tail = ["a2", "a4"]
     if sm_tab == STEEL_MODEL_STEEL4:
         param_cols = [*_pcore_shared, *STEEL4_ISO_KEYS]
     else:

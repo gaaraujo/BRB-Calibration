@@ -129,6 +129,60 @@ def _path_ordered_sim_kwargs(
     return sm, sim_kw
 
 
+_OVERLAY_PARAMS_TWO_DECIMALS = frozenset({"L_T", "A_sc", "A_t", "fyp", "fyn", "E", "a2", "a4"})
+
+
+def _format_overlay_param_value(key: str, value: float) -> str:
+    if key in _OVERLAY_PARAMS_TWO_DECIMALS:
+        return f"{float(value):.2f}"
+    return f"{float(value):.10g}"
+
+
+def _format_overlay_params_txt(
+    *,
+    specimen_id: str,
+    set_id: int | str,
+    steel_model: str,
+    sim_kw: dict[str, float],
+    force_deformation_csv: Path | None = None,
+) -> str:
+    lines = [
+        f"specimen: {specimen_id}",
+        f"set_id: {set_id}",
+        f"steel_model: {steel_model}",
+    ]
+    if force_deformation_csv is not None:
+        lines.append(f"force_deformation: {force_deformation_csv}")
+    lines.append("")
+    for key in SIM_PARAMS_FROM_ROW:
+        if key in sim_kw:
+            lines.append(f"{key}: {_format_overlay_param_value(key, sim_kw[key])}")
+    return "\n".join(lines) + "\n"
+
+
+def _write_overlay_params_txt(
+    out_dir: Path,
+    *,
+    specimen_id: str,
+    set_id: int | str,
+    steel_model: str,
+    sim_kw: dict[str, float],
+    force_deformation_csv: Path | None = None,
+) -> Path:
+    txt_path = out_dir / f"{specimen_id}_set{set_id}_force_def.txt"
+    txt_path.write_text(
+        _format_overlay_params_txt(
+            specimen_id=specimen_id,
+            set_id=set_id,
+            steel_model=steel_model,
+            sim_kw=sim_kw,
+            force_deformation_csv=force_deformation_csv,
+        ),
+        encoding="utf-8",
+    )
+    return txt_path
+
+
 # Plot styling (numerical model curve); experimental color from ``plot_dimensions``.
 # Individual L-BFGS overlays: always **train** color. (Generalized per-specimen PNGs set train vs
 # validation in ``optimize_generalized_brb_mse``.)
@@ -582,9 +636,14 @@ def run_one_specimen(
     norm_xy_half: tuple[float, float] | None = None,
     override_bp: float | None = None,
     override_bn: float | None = None,
+    force_deformation_csv: Path | None = None,
 ) -> None:
     """Run simulation and plot overlays for one specimen (possibly multiple parameter sets)."""
-    csv_path = resolve_resampled_force_deformation_csv(specimen_id, _PROJECT_ROOT)
+    csv_path = (
+        Path(force_deformation_csv).expanduser().resolve()
+        if force_deformation_csv is not None
+        else resolve_resampled_force_deformation_csv(specimen_id, _PROJECT_ROOT)
+    )
     if csv_path is None or not csv_path.is_file():
         print(f"  Skipping {specimen_id}: resampled force_deformation.csv not found")
         return
@@ -643,6 +702,14 @@ def run_one_specimen(
             set_id=set_id,
             out_dir=out_dir,
             norm_xy_half=norm_xy_half,
+        )
+        _write_overlay_params_txt(
+            out_dir,
+            specimen_id=specimen_id,
+            set_id=set_id,
+            steel_model=sm,
+            sim_kw=sim_kw,
+            force_deformation_csv=csv_path,
         )
         print(f"  Saved plots for {specimen_id}, set {set_id}")
 

@@ -48,9 +48,6 @@ OPTIMIZABLE_SIM_PARAM_NAMES: frozenset[str] = frozenset(
         "a2",
         "a3",
         "a4",
-        "fup_ratio",
-        "fun_ratio",
-        "Ru0",
         *STEEL4_ISO_KEYS,
     )
 )

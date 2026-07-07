@@ -43,7 +43,8 @@ run_pipeline_steps() {
   python scripts/calibrate/print_calibration_config_heads.py
 
   # Full reset (optional): uncomment to wipe regenerated data/results before rerun.
-  # Preserves data/raw/ and config/calibration/*.csv (removes regenerated data/* pipeline dirs and all results/calibration/, including individual_optimize/initial_brb_parameters.csv)
+  # Preserves data/raw/ and config/calibration/*.csv; wipes postprocess data/*, all of results/plots
+  # and results/calibration/ (incl. single_specimen), and summary_statistics/
   # ./clean_outputs.sh
 
   # --- Postprocess: cycle_points_original -> filtered -> resampled + cycle_points_resampled ---

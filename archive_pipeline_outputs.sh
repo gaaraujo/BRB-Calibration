@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Zip everything clean_outputs.sh would wipe: data/* pipeline subtrees, full results/plots,
-# results/calibration, and summary_statistics/ (entire tree).
+# Zip everything clean_outputs.sh would wipe: postprocess data/* subtrees, full results/plots
+# (incl. apparent_b/, calibration/single_specimen/, debug_*), results/calibration/, and summary_statistics/.
 # Run from repo root: ./archive_pipeline_outputs.sh [--label myrun] [--out-dir run_snapshots]
 # Output: run_snapshots/<yyyyMMdd_HHmmss>_<label>.zip - unzip at repo root to restore paths.
 

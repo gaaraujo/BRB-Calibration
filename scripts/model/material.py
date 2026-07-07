@@ -1,19 +1,11 @@
 """OpenSees BRB: uniaxial SteelMPF or Steel4 for the corotational truss.
 
-SteelMPF: with **native** ``opensees``, after ``a4`` pass ``-ult`` then ``fup``, ``fun``, ``Ru0``
-(same units as ``fyp``/``fyn``). With **openseespy** only, the tail is omitted (stock ``SteelMPF`` API).
+SteelMPF uses the stock OpenSeesPy / OpenSees ``SteelMPF`` call (through ``a4`` only).
 """
 
 from __future__ import annotations
 
-try:
-    import opensees as ops
-
-    OPENSEES_IS_NATIVE = True
-except ImportError:
-    import openseespy.opensees as ops
-
-    OPENSEES_IS_NATIVE = False
+import openseespy.opensees as ops
 
 BRB_MAT_TAG = 1000
 
@@ -32,13 +24,9 @@ def ops_BRB_material(
     a2: float = 1.0,
     a3: float = 0.0,
     a4: float = 1.0,
-    # Ultimate tail (``-ult``, ``fup``, ``fun``, ``Ru0``): native OpenSees only; ignored for openseespy.
-    fup: float | None = None,
-    fun: float | None = None,
-    Ru0: float = 5.0,
 ) -> int:
     """Define uniaxial SteelMPF for the BRB truss; returns the material tag."""
-    base = (
+    ops.uniaxialMaterial(
         "SteelMPF",
         BRB_MAT_TAG,
         fyp,
@@ -54,12 +42,6 @@ def ops_BRB_material(
         a3,
         a4,
     )
-    if OPENSEES_IS_NATIVE:
-        fup_v = float(fyp) * 4.0 if fup is None else float(fup)
-        fun_v = float(fyn) * 4.0 if fun is None else float(fun)
-        ops.uniaxialMaterial(*base, "-ult", fup_v, fun_v, float(Ru0))
-    else:
-        ops.uniaxialMaterial(*base)
     return BRB_MAT_TAG
 
 

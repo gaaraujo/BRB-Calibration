@@ -15,3 +15,4 @@ ID, Name   , f_yc_ksi, A_c_in2, A_t_in2, L_T_in, L_y_in, experimental_layout, pa
 14, C5     ,   43.366,   17.26,  51.78 , 213.54,  113.5, digitized          , false       , true                , false              ,                  0
 15, CB225  ,   38.6  ,    2.25,   5.625, 250   ,  175  , digitized          , true        , true                , true               ,                  0
 16, B3     ,   44.522,   11.2 ,  33.6  , 215   ,  120  , digitized          , false       , true                , false              ,                  0
+17, STF01  ,   40.0  ,    2.0 ,   6    , 120.00, 76.4375, raw               , true        , true                , true               ,                  0

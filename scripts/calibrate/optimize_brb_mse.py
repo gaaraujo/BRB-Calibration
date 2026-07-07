@@ -127,6 +127,7 @@ from calibrate.steel_model import (  # noqa: E402
     STEELMPF_ISO_KEYS,
     clamp_steel4_isotropic_slopes,
     normalize_steel_model,
+    sim_param_keys_for_model,
     sync_steel4_isotropic_slopes_in_output_row,
 )
 from calibrate.set_id_optimize_params import (  # noqa: E402
@@ -361,10 +362,13 @@ def _row_to_sim_params(prow: pd.Series) -> dict[str, float]:
     """
     Build float kwargs for ``run_simulation`` (excludes ``steel_model``).
 
-    Keys match ``SIM_PARAMS_FROM_ROW``. Missing optional columns use ``SIM_PARAM_FILL_DEFAULTS``.
+    Keys are model-specific (SteelMPF through ``a4`` only; Steel4 adds ``-iso`` fields).
+    Missing optional columns use ``SIM_PARAM_FILL_DEFAULTS``.
     """
+    sm = normalize_steel_model(prow.get("steel_model"))
+    keys = sim_param_keys_for_model(sm)
     out: dict[str, float] = {}
-    for k in SIM_PARAMS_FROM_ROW:
+    for k in keys:
         if k in prow.index and pd.notna(prow.get(k)):
             out[k] = float(prow[k])
         elif k in SIM_PARAM_FILL_DEFAULTS:

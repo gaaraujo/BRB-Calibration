@@ -20,6 +20,18 @@ CONFIG_PATH = PROJECT_ROOT / "config" / "raw_trim_ranges.yaml"
 
 FORCE_COL = "Force[kip]"
 DEF_COL = "Deformation[in]"
+_DEF_COL_ALIASES = ("Displacement[in]",)
+
+
+def _normalize_f_u_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Accept common deformation column spellings (e.g. Displacement[in] -> Deformation[in])."""
+    out = df.copy()
+    if DEF_COL not in out.columns:
+        for alt in _DEF_COL_ALIASES:
+            if alt in out.columns:
+                out = out.rename(columns={alt: DEF_COL})
+                break
+    return out
 
 
 def _load_exclusion_config() -> dict:
@@ -66,7 +78,7 @@ def load_raw_valid(specimen_id: str) -> pd.DataFrame:
     Output has the same number of rows and indices (0..n-1) as the file.
     """
     raw_path = _resolve_primary_csv_path(specimen_id)
-    df = pd.read_csv(raw_path).copy()
+    df = _normalize_f_u_columns(pd.read_csv(raw_path))
     config = _load_exclusion_config()
     spec_config = config.get(specimen_id) if isinstance(config.get(specimen_id), dict) else {}
     ranges = spec_config.get("exclude_ranges") or []
@@ -117,4 +129,4 @@ def load_raw_full(specimen_id: str) -> pd.DataFrame | None:
         return None
     if not raw_path.is_file():
         return None
-    return pd.read_csv(raw_path)
+    return _normalize_f_u_columns(pd.read_csv(raw_path))

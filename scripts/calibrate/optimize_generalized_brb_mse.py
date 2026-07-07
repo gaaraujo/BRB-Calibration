@@ -141,6 +141,7 @@ from calibrate.steel_model import (  # noqa: E402
     STEEL_MODEL_STEELMPF,
     STEELMPF_ISO_KEYS,
     normalize_steel_model,
+    sim_param_keys_for_model,
     sync_steel4_isotropic_slopes_in_output_row,
 )
 from calibrate.specimen_weights import (  # noqa: E402
@@ -233,7 +234,7 @@ def _prow_from_catalog_and_generalized_settings(
         "fyn": fy,
         }
     )
-    for k in SIM_PARAMS_FROM_ROW:
+    for k in sim_param_keys_for_model(sm):
         if k in out:
             continue
         if k not in steel:

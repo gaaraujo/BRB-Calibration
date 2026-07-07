@@ -1,0 +1,33 @@
+# Single-specimen SteelMPF calibration input (edit values, then run calibrate_one_specimen.py).
+# section: meta | steel | loss | bound
+# steel: E, R0, cR1, cR2, a1-a4 (stock OpenSeesPy SteelMPF)
+# bound value: lower,upper  (only parameters listed in meta.optimize_params need bounds)
+section,key,value
+meta,set_id,1
+meta,optimize_params,"b_p,b_n,R0,cR1,cR2,a1,a3"
+meta,default_b_p,0.005
+meta,default_b_n,0.025
+steel,E,29000
+steel,R0,20
+steel,cR1,0.8875
+steel,cR2,0.15
+steel,a1,0.04
+steel,a2,1
+steel,a3,0.04
+steel,a4,1
+loss,w_feat_l2,1
+loss,w_feat_l1,0
+loss,w_energy_l2,0
+loss,w_energy_l1,0
+loss,w_unordered_binenv_l2,0
+loss,w_unordered_binenv_l1,0
+loss,use_amplitude_weights,true
+loss,amplitude_weight_power,2
+loss,amplitude_weight_eps,0.05
+bound,b_p,"0,0.05"
+bound,b_n,"0,0.05"
+bound,R0,"1,50"
+bound,cR1,"0.8,0.99"
+bound,cR2,"0.001,3"
+bound,a1,"0,0.2"
+bound,a3,"0,0.2"
