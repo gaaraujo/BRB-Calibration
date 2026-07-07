@@ -1,18 +1,18 @@
 ID, Name   , f_yc_ksi, A_c_in2, A_t_in2, L_T_in, L_y_in, experimental_layout, path_ordered, skip_filter_resample, individual_optimize, generalized_weight
- 1, PC250  ,   41.3  ,    5.96,  59.6  , 251.96,  179.4, raw                , true        , false               , true               ,                  1
- 2, PC350  ,   41.3  ,    8.34,  83.4  , 252.02,  183.3, raw                , true        , false               , true               ,                  1
- 3, PC160  ,   41.3  ,    3.8 ,  38    , 252   ,  176  , raw                , true        , false               , true               ,                  1
- 4, PC500  ,   37.9  ,   12.66, 126.6  , 251.98,  185.1, raw                , true        , false               , true               ,                  1
- 5, PC750A ,   37.9  ,   17.85, 178.5  , 251.98,  184.2, raw                , true        , false               , true               ,                  1
- 6, PC750B ,   37.9  ,   17.87, 178.7  , 251.96,  179.4, raw                , true        , false               , true               ,                  1
- 7, PC1200A,   37.9  ,   28.53, 285.3  , 252.02,  185.2, raw                , true        , false               , true               ,                  1
- 8, PC1200B,   37.9  ,   28.62, 286.2  , 251.96,  181.3, raw                , true        , false               , true               ,                  1
- 9, PC3SB  ,   40    ,    5   ,  50    , 116   ,   78  , digitized          , true        , false               , true               ,                  1
-10, A5     ,   44.083,    5.66,  56.6  , 215.55,  148.7, digitized          , false       , true                , false              ,                  0
-11, B6     ,   44.522,   11.2 ,  33.6  , 215   ,  120  , digitized          , false       , true                , false              ,                  0
-12, B7     ,   44.522,   11.2 ,  33.6  , 215   ,  120  , digitized          , false       , true                , false              ,                  0
-13, B8     ,   44.522,   11.2 ,  33.6  , 215   ,  120  , digitized          , false       , true                , false              ,                  0
-14, C5     ,   43.366,   17.26,  51.78 , 213.54,  113.5, digitized          , false       , true                , false              ,                  0
-15, CB225  ,   38.6  ,    2.25,   5.625, 250   ,  175  , digitized          , true        , true                , true               ,                  0
-16, B3     ,   44.522,   11.2 ,  33.6  , 215   ,  120  , digitized          , false       , true                , false              ,                  0
-17, STF01  ,   40.0  ,    2.0 ,   6    , 120.00, 76.4375, raw               , true        , true                , true               ,                  0
+1, PC250  ,41.30,5.96,59.60,251.96,179.40, raw                , true        , false               , true               ,1
+2, PC350  ,41.30,8.34,83.40,252.02,183.30, raw                , true        , false               , true               ,1
+3, PC160  ,41.30,3.80,38.00,252.00,176.00, raw                , true        , false               , true               ,1
+4, PC500  ,37.90,12.66,126.60,251.98,185.10, raw                , true        , false               , true               ,1
+5, PC750A ,37.90,17.85,178.50,251.98,184.20, raw                , true        , false               , true               ,1
+6, PC750B ,37.90,17.87,178.70,251.96,179.40, raw                , true        , false               , true               ,1
+7, PC1200A,37.90,28.53,285.30,252.02,185.20, raw                , true        , false               , true               ,1
+8, PC1200B,37.90,28.62,286.20,251.96,181.30, raw                , true        , false               , true               ,1
+9, PC3SB  ,40.00,5.00,50.00,116.00,78.00, digitized          , true        , false               , true               ,1
+10, A5     ,44.08,5.66,56.60,215.55,148.70, digitized          , false       , true                , false              ,0
+11, B6     ,44.52,11.20,33.60,215.00,120.00, digitized          , false       , true                , false              ,0
+12, B7     ,44.52,11.20,33.60,215.00,120.00, digitized          , false       , true                , false              ,0
+13, B8     ,44.52,11.20,33.60,215.00,120.00, digitized          , false       , true                , false              ,0
+14, C5     ,43.37,17.26,51.78,213.54,113.50, digitized          , false       , true                , false              ,0
+15, CB225  ,38.60,2.25,5.63,250.00,175.00, digitized          , true        , true                , true               ,0
+16, B3     ,44.52,11.20,33.60,215.00,120.00, digitized          , false       , true                , false              ,0
+17, STF01  ,41.90,2.00,4.00,116.44,76.44, raw               , true        , true                , true               ,0

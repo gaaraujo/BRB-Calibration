@@ -3,11 +3,17 @@ Calibrate and plot one specimen using ``input.csv`` in this folder (SteelMPF onl
 
 Reads brace geometry and nominal yield from ``config/calibration/BRB-Specimens.csv``.
 SteelMPF seeds, optimizer bounds, and loss weights come from ``input.csv`` (default:
-``scripts/calibrate_single/input.csv``). Experimental F-u from ``--force-deformation``.
+``scripts/calibrate_single/input.csv``; ``steel.b_p`` / ``steel.b_n`` are numeric literals or
+apparent-``b`` stat keywords). ``meta.set_id`` may list multiple ids (comma-separated); other rows
+then supply one value per set_id (quoted fields may contain commas). Experimental F-u from
+``--force-deformation``.
 
 Typical (from repository root)::
 
     python scripts/calibrate_single/calibrate_one_specimen.py STF01
+
+Use ``--replot`` to regenerate overlay PNGs from an existing ``parameters.csv`` without
+re-running L-BFGS-B optimization.
 
 Omit ``--force-deformation`` to use ``data/resampled/{Name}/force_deformation.csv`` when it exists.
 With ``--prepare-data``, raw data must live under ``data/raw/{Name}/``; postprocess writes the
@@ -22,8 +28,8 @@ under ``.../single_specimen/{Name}/cycles/`` (same figures as ``plot_cycle_landm
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 import argparse
-import math
 import sys
 from pathlib import Path
 
@@ -47,6 +53,7 @@ from calibrate.cycle_feature_loss import (  # noqa: E402
     deformation_scale_s_d,
     load_p_y_kip_catalog,
 )
+from calibrate.build_initial_brb_parameters import resolve_b_arm_from_stats  # noqa: E402
 from calibrate.extract_bn_bp import extract_bn_bp_one_specimen, get_b_lists_one_specimen  # noqa: E402
 from calibrate.optimize_brb_mse import (  # noqa: E402
     DEBUG_PARTITION,
@@ -67,10 +74,13 @@ from filter_force import (  # noqa: E402
     _process_path_ordered,
 )
 from load_input import (  # noqa: E402
+    FALLBACK_B_N,
+    FALLBACK_B_P,
     STEEL_MODEL,
     SingleCalibrateInput,
-    load_single_calibrate_input,
+    load_single_calibrate_inputs,
 )
+from plot_all_sets_overlays import plot_all_sets_force_def_grid  # noqa: E402
 from resample_filtered import (  # noqa: E402
     process_specimen,
     process_specimen_digitized_unordered,
@@ -89,33 +99,72 @@ RESULTS_SINGLE = _PROJECT_ROOT / "results" / "calibration" / "single_specimen"
 PLOTS_SINGLE = _PROJECT_ROOT / "results" / "plots" / "calibration" / "single_specimen"
 
 
-def _finite_or(default: float, value: object) -> float:
-    try:
-        v = float(value)
-    except (TypeError, ValueError):
-        return default
-    return v if math.isfinite(v) else default
+@dataclass(frozen=True)
+class CalibrateRunContext:
+    specimen_out: Path
+    csv_path: Path
+    cat_row: pd.Series
+    overlay_dir: Path
 
 
-def _apparent_b_medians(
+def _format_b_spec(spec: float | str) -> str:
+    if isinstance(spec, float):
+        return f"{spec:g}"
+    return str(spec)
+
+
+def _has_apparent_b_stats(stats: dict, arm: str) -> bool:
+    for suffix in (
+        "median",
+        "mean",
+        "weighted_mean",
+        "q1",
+        "q3",
+        "min",
+        "max",
+        "max_amplitude",
+    ):
+        v = stats.get(f"b_{arm}_{suffix}")
+        if v is None:
+            continue
+        try:
+            if np.isfinite(float(v)):
+                return True
+        except (TypeError, ValueError):
+            continue
+    return False
+
+
+def _resolve_b_seeds(
     specimen: str,
-    df: pd.DataFrame,
-    points: list[dict],
-    cat_row: pd.Series,
+    stats: dict,
     cfg: SingleCalibrateInput,
 ) -> tuple[float, float]:
-    stats = extract_bn_bp_one_specimen(
-        specimen,
-        df,
-        points,
-        float(cat_row["L_T_in"]),
-        float(cat_row["L_y_in"]),
-        float(cat_row["A_c_in2"]),
-        float(cat_row["A_t_in2"]),
-        float(cat_row["f_yc_ksi"]),
-    )
-    b_p = _finite_or(cfg.default_b_p, stats.get("b_p_median", np.nan))
-    b_n = _finite_or(cfg.default_b_n, stats.get("b_n_median", np.nan))
+    if isinstance(cfg.b_p_spec, float):
+        b_p = float(cfg.b_p_spec)
+    elif not _has_apparent_b_stats(stats, "p"):
+        print(
+            f"  Warning: no apparent b_p stats for {specimen!r}; "
+            f"using default {FALLBACK_B_P:g}"
+        )
+        b_p = FALLBACK_B_P
+    else:
+        b_p = resolve_b_arm_from_stats(
+            stats, arm="p", spec=cfg.b_p_spec, fallback=FALLBACK_B_P
+        )
+
+    if isinstance(cfg.b_n_spec, float):
+        b_n = float(cfg.b_n_spec)
+    elif not _has_apparent_b_stats(stats, "n"):
+        print(
+            f"  Warning: no apparent b_n stats for {specimen!r}; "
+            f"using default {FALLBACK_B_N:g}"
+        )
+        b_n = FALLBACK_B_N
+    else:
+        b_n = resolve_b_arm_from_stats(
+            stats, arm="n", spec=cfg.b_n_spec, fallback=FALLBACK_B_N
+        )
     return b_p, b_n
 
 
@@ -359,10 +408,13 @@ def calibrate_and_plot(
     cfg: SingleCalibrateInput,
     *,
     prepare_data: bool = False,
+    plot_apparent_b: bool = True,
     out_dir: Path | None = None,
     plots_dir: Path | None = None,
     use_amplitude_weights: bool | None = None,
-) -> Path:
+    param_rows_out: list[pd.Series] | None = None,
+    metrics_rows_out: list[dict] | None = None,
+) -> CalibrateRunContext:
     catalog, cat_row = _validate_specimen(specimen)
 
     csv_path = _resolve_force_deformation_path(force_deformation_csv)
@@ -377,11 +429,25 @@ def calibrate_and_plot(
     F_exp = df["Force[kip]"].to_numpy(dtype=float)
     points = _cycle_points_for_csv(specimen, df)
 
-    b_p, b_n = _apparent_b_medians(specimen, df, points, cat_row, cfg)
-    print(f"  Apparent b seeds: b_p={b_p:.6g} (median), b_n={b_n:.6g} (median)")
+    b_stats = extract_bn_bp_one_specimen(
+        specimen,
+        df,
+        points,
+        float(cat_row["L_T_in"]),
+        float(cat_row["L_y_in"]),
+        float(cat_row["A_c_in2"]),
+        float(cat_row["A_t_in2"]),
+        float(cat_row["f_yc_ksi"]),
+    )
+    b_p, b_n = _resolve_b_seeds(specimen, b_stats, cfg)
+    print(
+        f"  Apparent b seeds: b_p={b_p:.6g} ({_format_b_spec(cfg.b_p_spec)}), "
+        f"b_n={b_n:.6g} ({_format_b_spec(cfg.b_n_spec)})"
+    )
 
     overlay_dir = plots_dir or (PLOTS_SINGLE / specimen)
-    _plot_apparent_b(specimen, cat_row, plots_base=overlay_dir)
+    if plot_apparent_b:
+        _plot_apparent_b(specimen, cat_row, plots_base=overlay_dir)
 
     prow = _parameter_row(specimen, cat_row, cfg, b_p=b_p, b_n=b_n)
     loss = cfg.loss
@@ -441,7 +507,6 @@ def calibrate_and_plot(
     specimen_out = out_dir or (RESULTS_SINGLE / specimen)
     specimen_out.mkdir(parents=True, exist_ok=True)
     params_path = specimen_out / "parameters.csv"
-    pd.DataFrame([out_row]).to_csv(params_path, index=False)
 
     sim_dir = specimen_out / "parameters_simulated_force"
     save_simulated_force_history(
@@ -454,30 +519,36 @@ def calibrate_and_plot(
     catalog_by_name = catalog.set_index("Name")
     mi = _metrics_dict_for_breakdown(bd_initial, loss, "initial") if bd_initial else {}
     mf = _metrics_dict_for_breakdown(bd_final, loss, "final")
-    metrics_path = specimen_out / "parameters_metrics.csv"
-    metrics_dataframe(
-        [
-            {
-                "Name": specimen,
-                "set_id": cfg.set_id,
-                "specimen_weight": 1.0,
-                "contributes_to_aggregate": True,
-                **catalog_metrics_fields(specimen, catalog_by_name),
-                "weight_config": "single_specimen",
-                "calibration_stage": "optimize",
-                "aggregate_by_set_id": False,
-                **mi,
-                **mf,
-                **_loss_weight_snapshot(loss),
-                "S_F": s_f_ref,
-                "S_D": s_d_ref,
-                "S_E": s_e_ref,
-                "P_y_ref": p_y_ref,
-                "n_cycles": len(amp_meta),
-                "success": mf["final_J_total"] < FAILURE_PENALTY * 0.5,
-            }
-        ]
-    ).to_csv(metrics_path, index=False)
+    metrics_record = {
+        "Name": specimen,
+        "set_id": cfg.set_id,
+        "specimen_weight": 1.0,
+        "contributes_to_aggregate": True,
+        **catalog_metrics_fields(specimen, catalog_by_name),
+        "weight_config": "single_specimen",
+        "calibration_stage": "optimize",
+        "aggregate_by_set_id": False,
+        **mi,
+        **mf,
+        **_loss_weight_snapshot(loss),
+        "S_F": s_f_ref,
+        "S_D": s_d_ref,
+        "S_E": s_e_ref,
+        "P_y_ref": p_y_ref,
+        "n_cycles": len(amp_meta),
+        "success": mf["final_J_total"] < FAILURE_PENALTY * 0.5,
+    }
+    if param_rows_out is not None:
+        param_rows_out.append(out_row)
+    else:
+        pd.DataFrame([out_row]).to_csv(params_path, index=False)
+
+    if metrics_rows_out is not None:
+        metrics_rows_out.append(metrics_record)
+    else:
+        metrics_dataframe([metrics_record]).to_csv(
+            specimen_out / "parameters_metrics.csv", index=False
+        )
 
     jtot = mf["final_J_total"]
     print(
@@ -504,7 +575,46 @@ def calibrate_and_plot(
     else:
         print(f"  Skipped cycle/landmark debug (digitized unordered specimen {specimen!r})")
 
+    return CalibrateRunContext(
+        specimen_out=specimen_out,
+        csv_path=csv_path,
+        cat_row=cat_row,
+        overlay_dir=overlay_dir,
+    )
+
+
+def replot_from_saved(
+    specimen: str,
+    force_deformation_csv: Path,
+    *,
+    out_dir: Path | None = None,
+    plots_dir: Path | None = None,
+) -> CalibrateRunContext:
+    """Regenerate overlays from ``parameters.csv`` (skip optimization)."""
+    _catalog, cat_row = _validate_specimen(specimen)
+    specimen_out = out_dir or (RESULTS_SINGLE / specimen)
+    params_path = specimen_out / "parameters.csv"
+    if not params_path.is_file():
+        raise SystemExit(
+            f"No saved parameters at {params_path}. "
+            "Run calibration first or pass --out-dir to the results folder."
+        )
+
     params_df = pd.read_csv(params_path)
+    if params_df.empty:
+        raise SystemExit(f"Empty parameters file: {params_path}")
+    if "set_id" not in params_df.columns:
+        raise SystemExit(f"{params_path}: missing set_id column")
+
+    csv_path = _resolve_force_deformation_path(force_deformation_csv)
+    _load_force_deformation_csv(csv_path)
+    overlay_dir = plots_dir or (PLOTS_SINGLE / specimen)
+    overlay_dir.mkdir(parents=True, exist_ok=True)
+
+    set_ids = params_df["set_id"].tolist()
+    print(f"  Replot from {params_path} ({len(set_ids)} set_id(s): {set_ids})")
+    print(f"  Using force-deformation: {csv_path}")
+
     run_one_specimen(
         specimen,
         params_df,
@@ -516,7 +626,25 @@ def calibrate_and_plot(
         force_deformation_csv=csv_path,
     )
     print(f"  Wrote overlays under {overlay_dir}")
-    return params_path
+
+    exp_df = pd.read_csv(csv_path)
+    grid_paths = plot_all_sets_force_def_grid(
+        specimen,
+        params_df,
+        cat_row,
+        exp_df["Deformation[in]"].to_numpy(dtype=float),
+        exp_df["Force[kip]"].to_numpy(dtype=float),
+        overlay_dir,
+    )
+    for grid_path in grid_paths:
+        print(f"  Wrote all-set overlay grid: {grid_path}")
+
+    return CalibrateRunContext(
+        specimen_out=specimen_out,
+        csv_path=csv_path,
+        cat_row=cat_row,
+        overlay_dir=overlay_dir,
+    )
 
 
 def main() -> None:
@@ -557,6 +685,14 @@ def main() -> None:
         help=f"Calibration input CSV (default: {DEFAULT_INPUT})",
     )
     p.add_argument(
+        "--replot",
+        action="store_true",
+        help=(
+            "Skip optimization; reload parameters.csv from --out-dir and regenerate "
+            "force–deformation overlays and all-set grid PNGs."
+        ),
+    )
+    p.add_argument(
         "--prepare-data",
         action="store_true",
         help=(
@@ -590,38 +726,97 @@ def main() -> None:
 
     specimen = str(specimen).strip()
     input_path = Path(args.input).expanduser().resolve()
-    try:
-        cfg = load_single_calibrate_input(input_path)
-    except (FileNotFoundError, ValueError) as exc:
-        raise SystemExit(str(exc)) from exc
 
-    prepare_data = bool(args.prepare_data)
+    prepare_data = bool(args.prepare_data) and not args.replot
+    if args.replot and args.prepare_data:
+        print("  Note: --prepare-data ignored with --replot")
     if args.force_deformation is None:
         force_csv = _default_force_deformation_path(specimen, prepare_data=prepare_data)
     else:
         force_csv = args.force_deformation
 
-    print(f"  Loaded input: {input_path}")
-    params_path = calibrate_and_plot(
-        specimen,
-        force_csv,
-        cfg,
-        prepare_data=prepare_data,
-        out_dir=args.out_dir,
-        plots_dir=args.plots_dir,
-        use_amplitude_weights=args.amplitude_weights,
-    )
-    out_dir = params_path.parent
+    if args.replot:
+        run_ctx = replot_from_saved(
+            specimen,
+            force_csv,
+            out_dir=args.out_dir,
+            plots_dir=args.plots_dir,
+        )
+    else:
+        try:
+            cfgs = load_single_calibrate_inputs(input_path)
+        except (FileNotFoundError, ValueError) as exc:
+            raise SystemExit(str(exc)) from exc
+
+        set_ids = [cfg.set_id for cfg in cfgs]
+        print(f"  Loaded input: {input_path} ({len(cfgs)} set_id(s): {set_ids})")
+
+        param_rows: list[pd.Series] = []
+        metrics_rows: list[dict] = []
+        run_ctx: CalibrateRunContext | None = None
+        for i, cfg in enumerate(cfgs):
+            if len(cfgs) > 1:
+                print(f"\n=== set_id={cfg.set_id} ===")
+            run_ctx = calibrate_and_plot(
+                specimen,
+                force_csv,
+                cfg,
+                prepare_data=prepare_data and i == 0,
+                plot_apparent_b=(i == 0),
+                out_dir=args.out_dir,
+                plots_dir=args.plots_dir,
+                use_amplitude_weights=args.amplitude_weights,
+                param_rows_out=param_rows,
+                metrics_rows_out=metrics_rows,
+            )
+
+        if run_ctx is None:
+            raise SystemExit("No calibration set_id configurations loaded.")
+
+        params_path = run_ctx.specimen_out / "parameters.csv"
+        pd.DataFrame(param_rows).to_csv(params_path, index=False)
+        metrics_dataframe(metrics_rows).to_csv(
+            run_ctx.specimen_out / "parameters_metrics.csv", index=False
+        )
+        run_one_specimen(
+            specimen,
+            pd.DataFrame(param_rows),
+            run_ctx.cat_row,
+            run_ctx.overlay_dir,
+            norm_xy_half=None,
+            override_bp=None,
+            override_bn=None,
+            force_deformation_csv=run_ctx.csv_path,
+        )
+        print(f"  Wrote overlays under {run_ctx.overlay_dir}")
+
+        exp_df = pd.read_csv(run_ctx.csv_path)
+        grid_paths = plot_all_sets_force_def_grid(
+            specimen,
+            pd.DataFrame(param_rows),
+            run_ctx.cat_row,
+            exp_df["Deformation[in]"].to_numpy(dtype=float),
+            exp_df["Force[kip]"].to_numpy(dtype=float),
+            run_ctx.overlay_dir,
+        )
+        for grid_path in grid_paths:
+            print(f"  Wrote all-set overlay grid: {grid_path}")
+
+    out_dir = run_ctx.specimen_out
     plots_dir = args.plots_dir or (PLOTS_SINGLE / specimen)
     force_resolved = force_csv.expanduser().resolve()
+    params_path = out_dir / "parameters.csv"
     print(
         f"\nDone: {specimen}\n"
-        f"  Input:      {input_path}\n"
+        f"  Input:      {input_path if not args.replot else '(replot — input.csv not used)'}\n"
         f"  Force-u:    {force_resolved}\n"
         f"  Parameters: {params_path}\n"
         f"  Metrics:    {out_dir / 'parameters_metrics.csv'}\n"
         f"  Sim CSV:    {out_dir / 'parameters_simulated_force'}\n"
         f"  Overlays:   {plots_dir}\n"
+        f"  All sets:   {plots_dir / f'{specimen}_all_sets_force_def.png'}\n"
+        f"              {plots_dir / f'{specimen}_all_sets_force_def_norm.png'}\n"
+        f"  Params:     {plots_dir / f'{specimen}_setALL_params.txt'}\n"
         f"  Apparent b: {plots_dir / 'apparent_b'}\n"
         f"  Cycles:     {plots_dir / 'cycles'}"
     )

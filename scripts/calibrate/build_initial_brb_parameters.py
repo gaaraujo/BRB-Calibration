@@ -253,8 +253,8 @@ def _full_numeric_seed(steel_model: str, row: pd.Series) -> dict[str, float]:
     return _resolve_numeric_seed_overrides(row, steel_model)
 
 
-def _parse_b_spec(raw: object, *, label: str) -> float | str:
-    """Parse b_p/b_n cell: float or statistic keyword."""
+def parse_b_p_n_spec(raw: object, *, label: str) -> float | str:
+    """Parse ``b_p`` / ``b_n`` cell: numeric literal or apparent-``b`` statistic keyword."""
     if _is_missing_sentinel(raw):
         return "median"
     if raw is None:
@@ -289,6 +289,10 @@ def _parse_b_spec(raw: object, *, label: str) -> float | str:
     raise ValueError(f"{label}: expected a number or stat in {sorted(B_STAT_NAMES)}, got {raw!r}")
 
 
+def _parse_b_spec(raw: object, *, label: str) -> float | str:
+    return parse_b_p_n_spec(raw, label=label)
+
+
 def _finite_scalar(x: float) -> bool:
     return isinstance(x, (int, float)) and bool(np.isfinite(float(x)))
 
@@ -302,12 +306,26 @@ def _get_bn_col(row: pd.Series, col: str) -> float:
     return float(v)
 
 
-def _resolve_b_arm(row: pd.Series, *, arm: str, spec: float | str) -> float:
+def resolve_b_arm_from_stats(
+    stats: dict[str, float] | pd.Series,
+    *,
+    arm: str,
+    spec: float | str,
+    fallback: float | None = None,
+) -> float:
+    """
+    Resolve one ``b_p`` / ``b_n`` seed from a numeric literal or statistic keyword.
+
+    ``stats`` must expose ``b_{p|n}_{median,mean,...}`` keys (as in ``extract_bn_bp_one_specimen`` or
+    ``specimen_apparent_bn_bp.csv``). Non-numeric ``spec`` uses the same fallback chain as
+    ``set_id_settings.csv``; ``fallback`` overrides ``STEEL_DEFAULT`` when every stat is missing.
+    """
     if arm not in ("p", "n"):
         raise ValueError("arm must be 'p' or 'n'")
     if isinstance(spec, float):
         return float(spec)
 
+    row = stats if isinstance(stats, pd.Series) else pd.Series(stats)
     med = _get_bn_col(row, f"b_{arm}_median")
     mean = _get_bn_col(row, f"b_{arm}_mean")
     wmean = _get_bn_col(row, f"b_{arm}_weighted_mean")
@@ -316,7 +334,11 @@ def _resolve_b_arm(row: pd.Series, *, arm: str, spec: float | str) -> float:
     q3 = _get_bn_col(row, f"b_{arm}_q3")
     vmin = _get_bn_col(row, f"b_{arm}_min")
     vmax = _get_bn_col(row, f"b_{arm}_max")
-    dflt = float(STEEL_DEFAULT["b_p"] if arm == "p" else STEEL_DEFAULT["b_n"])
+    dflt = float(
+        fallback
+        if fallback is not None
+        else (STEEL_DEFAULT["b_p"] if arm == "p" else STEEL_DEFAULT["b_n"])
+    )
 
     stat = spec
     if stat == "median":
@@ -380,6 +402,10 @@ def _resolve_b_arm(row: pd.Series, *, arm: str, spec: float | str) -> float:
             return float(mean)
         return dflt
     raise ValueError(f"unknown b stat {stat!r}")
+
+
+def _resolve_b_arm(row: pd.Series, *, arm: str, spec: float | str) -> float:
+    return resolve_b_arm_from_stats(row, arm=arm, spec=spec)
 
 
 def _ensure_bn_bp_stat_columns(bn_bp: pd.DataFrame) -> pd.DataFrame:

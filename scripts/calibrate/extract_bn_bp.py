@@ -25,10 +25,10 @@ Legacy plastic onset (fallback only for path-ordered data) uses ``|F| >= PLASTIC
 (landmark loss uses ``f_y A_sc`` without this ratio; apparent-b extraction keeps 1.1 here.)
 Input resampled: ``data/resampled/{Name}/force_deformation.csv``. Scatter: filtered cloud if present else raw.
 ``get_b_and_amplitude_lists_one_specimen`` returns segment-level ``b`` lists paired with plastic-fit amplitudes (for plots).
-Per loading direction, a half-cycle contributes to apparent ``b`` only if its plastic-fit amplitude is
-at least ``TRAILING_CYCLE_AMP_FRAC_OF_MAX_SEEN`` (default 0.8) times the **maximum** plastic-fit amplitude
-seen in that direction so far (chronological); smaller cycles are skipped, but later large half-cycles can
-qualify again.
+Every opposite-peak-to-peak half-cycle with a valid plastic fit is included; then segment ``b_p`` / ``b_n`` values
+outside ``[\\max(0, Q1 - k\\,\\mathrm{IQR}),\\, Q3 + k\\,\\mathrm{IQR}]`` (``k =`` ``APPARENT_B_IQR_MULTIPLIER``, default 3.0)
+are dropped **separately by loading direction** before aggregates and downstream plots.
+Individual plastic fits already reject non-finite or non-positive ``b`` (``b \\le 0``); the IQR window also floors at 0.
 ``get_b_segment_scatter_metrics_one_specimen`` adds plastic strain and cumulative $x$ columns at segment peaks
 (plus prior **maximum** opposite-direction deformation on the resampled prefix before each zero-to-peak segment for the plastic-opp abscissa), $P/(f_y A_{sc})$ at plastic line $\\cap$ $F=k_{\\mathrm{init}}u$ from the origin,
 and $\\sigma_0/f_y$ using the same latest opposite peak before plastic onset, plus $\\sigma_0^{\\mathrm{eq}}/f_y$
@@ -81,11 +81,9 @@ _SIG0_K_PARALLEL_TOL_FRAC = 1e-6
 APPARENT_B_WEIGHT_POWER = 2.0
 APPARENT_B_WEIGHT_EPS = 0.05
 
-# Per direction: keep a half-cycle for apparent ``b`` iff plastic-fit amplitude >= this fraction times
-# the max plastic-fit amplitude seen in that direction so far (running max updates every half-cycle).
-TRAILING_CYCLE_AMP_FRAC_OF_MAX_SEEN = 0.8
-# Alias kept for scripts that still import the old name.
-TRAILING_CYCLE_AMP_RATIO_PREV = TRAILING_CYCLE_AMP_FRAC_OF_MAX_SEEN
+# Drop segment ``b`` values outside max(0, Q1 - k*IQR) .. Q3 + k*IQR (separate k for b_p and b_n lists).
+APPARENT_B_IQR_MULTIPLIER = 3.0
+APPARENT_B_MIN = 0.0
 
 # Secant slope for ``b_plastic_onset="half_elastic_secant"``: ``F = F_r + SECANT_K_FRAC * k_init * (u-u_r)``.
 B_PLASTIC_ONSET_SECANT_K_FRAC = 1.0 / 3.0
@@ -97,33 +95,70 @@ B_PLASTIC_ONSET_DEFORM_FRAC_REMAINING_TO_PEAK_F = 0.75
 B_PLASTIC_FIT_DEFORM_FRAC_YIELD_TO_PEAK_F = 0.99
 
 
-class _TrailingCycleAmpGate:
-    """Chronological filter: ``amp >= frac * max_amp_seen_so_far`` per direction (max always includes current)."""
+def _apparent_b_iqr_inlier_mask(
+    values: list[float],
+    multiplier: float = APPARENT_B_IQR_MULTIPLIER,
+    *,
+    b_min: float = APPARENT_B_MIN,
+) -> list[bool]:
+    """True for finite entries within ``[max(b_min, Q1 - k IQR), Q3 + k IQR]``; non-finite → False."""
+    n = len(values)
+    if n == 0:
+        return []
+    b = np.asarray(values, dtype=float)
+    out = [False] * n
+    finite_idx = [i for i in range(n) if np.isfinite(b[i])]
+    if not finite_idx:
+        return out
+    bf = b[finite_idx]
+    if bf.size < 2:
+        for i in finite_idx:
+            out[i] = float(b[i]) >= float(b_min)
+        return out
+    q1, q3 = np.quantile(bf, [0.25, 0.75])
+    iqr = float(q3 - q1)
+    if not np.isfinite(iqr) or iqr <= 0.0:
+        lo, hi = float(np.min(bf)), float(np.max(bf))
+    else:
+        lo = float(q1) - float(multiplier) * iqr
+        hi = float(q3) + float(multiplier) * iqr
+    lo = max(float(b_min), lo)
+    for i in finite_idx:
+        v = float(b[i])
+        out[i] = lo <= v <= hi
+    return out
 
-    __slots__ = ("_ratio", "max_p", "max_n")
 
-    def __init__(self, ratio: float) -> None:
-        self._ratio = float(ratio)
-        self.max_p: float | None = None
-        self.max_n: float | None = None
+def _mask_select_lists(mask: list[bool], *lists: list) -> tuple[list, ...]:
+    return tuple([lst[i] for i, keep in enumerate(mask) if keep and i < len(lst)] for lst in lists)
 
-    def keep(self, amp: float, *, is_tension: bool) -> bool:
-        if not np.isfinite(amp) or amp < 0.0:
-            return False
-        a = float(amp)
-        if is_tension:
-            if self.max_p is None:
-                self.max_p = a
-                return True
-            ok = a >= self._ratio * self.max_p
-            self.max_p = max(self.max_p, a)
-            return ok
-        if self.max_n is None:
-            self.max_n = a
-            return True
-        ok = a >= self._ratio * self.max_n
-        self.max_n = max(self.max_n, a)
-        return ok
+
+def _filter_by_directional_b_iqr(
+    items: list,
+    *,
+    b_of,
+    is_tension_of,
+    multiplier: float = APPARENT_B_IQR_MULTIPLIER,
+) -> list:
+    """Keep items whose ``b`` lies within k*IQR of same-direction peers; preserve input order."""
+    if not items:
+        return []
+    tens = [x for x in items if is_tension_of(x)]
+    comp = [x for x in items if not is_tension_of(x)]
+    p_mask = _apparent_b_iqr_inlier_mask([float(b_of(x)) for x in tens], multiplier)
+    n_mask = _apparent_b_iqr_inlier_mask([float(b_of(x)) for x in comp], multiplier)
+    out: list = []
+    ti = ci = 0
+    for x in items:
+        if is_tension_of(x):
+            if p_mask[ti]:
+                out.append(x)
+            ti += 1
+        else:
+            if n_mask[ci]:
+                out.append(x)
+            ci += 1
+    return out
 
 
 def _delta_y_hat_inches(fy_ksi: float, E_hat_ksi: float, L_T_in: float) -> float | None:
@@ -977,10 +1012,8 @@ def _get_b_lists(
     ``amp_*`` remain plastic-fit-window amplitudes for weighted means and plots.
 
     Skips segments only when the plastic-line fit is unavailable (e.g. too small def range in the fit window).
-    Same-direction half-cycles whose plastic-fit amplitude is below
-    ``TRAILING_CYCLE_AMP_FRAC_OF_MAX_SEEN`` times the maximum plastic-fit amplitude seen in that direction
-    so far (chronological) are omitted; the running max always includes the current half-cycle for the next
-    comparison.
+    Every valid half-cycle is fitted; then ``b_p`` / ``b_n`` entries outside
+    ``[max(0, Q1 - k IQR), Q3 + k IQR]`` (``k =`` ``APPARENT_B_IQR_MULTIPLIER``) are dropped separately by direction.
 
     Amplitudes are max(|u|) over the fitted hardening region of each segment.
     ``end_idx_*`` / ``start_idx_*`` are indices into ``u`` for each kept segment (opposite peak → peak).
@@ -1016,7 +1049,6 @@ def _get_b_lists(
     equiv_sigma0_n_list: list[float] = []
     amp_peak_p_list: list[float] = []
     amp_peak_n_list: list[float] = []
-    trailing_gate = _TrailingCycleAmpGate(TRAILING_CYCLE_AMP_FRAC_OF_MAX_SEEN)
     for seg_i, (start_idx, end_idx, end_type) in enumerate(segments):
         if end_idx >= n or start_idx < 0:
             continue
@@ -1042,8 +1074,6 @@ def _get_b_lists(
         u_fit = np.asarray(fit["u_fit"], dtype=float)
         is_tension = bool(fit["is_tension"])
         amp = float(fit["amp"])
-        if not trailing_gate.keep(amp, is_tension=is_tension):
-            continue
         amp_peak = _half_cycle_peak_abs_u(u, start_idx, end_idx)
         sig0_norm, _ = _sigma0_norm_from_plastic_fit(u, F, fit, points)
         if is_tension:
@@ -1069,6 +1099,48 @@ def _get_b_lists(
             stress_n_list.append(p_norm)
             sigma0_n_list.append(sig0_norm)
             equiv_sigma0_n_list.append(eq_sig)
+    p_mask = _apparent_b_iqr_inlier_mask(b_p_list)
+    n_mask = _apparent_b_iqr_inlier_mask(b_n_list)
+    (
+        b_p_list,
+        amp_p_list,
+        end_p_list,
+        start_p_list,
+        stress_p_list,
+        sigma0_p_list,
+        equiv_sigma0_p_list,
+        amp_peak_p_list,
+    ) = _mask_select_lists(
+        p_mask,
+        b_p_list,
+        amp_p_list,
+        end_p_list,
+        start_p_list,
+        stress_p_list,
+        sigma0_p_list,
+        equiv_sigma0_p_list,
+        amp_peak_p_list,
+    )
+    (
+        b_n_list,
+        amp_n_list,
+        end_n_list,
+        start_n_list,
+        stress_n_list,
+        sigma0_n_list,
+        equiv_sigma0_n_list,
+        amp_peak_n_list,
+    ) = _mask_select_lists(
+        n_mask,
+        b_n_list,
+        amp_n_list,
+        end_n_list,
+        start_n_list,
+        stress_n_list,
+        sigma0_n_list,
+        equiv_sigma0_n_list,
+        amp_peak_n_list,
+    )
     return (
         b_p_list,
         b_n_list,
@@ -1108,7 +1180,6 @@ def iter_sig0_overlay_segments(
     out: list[dict[str, object]] = []
     segments = _segments_opposite_peak_to_peak(points)
     j_min_g, j_max_g = _global_u_extrema_indices(u)
-    trailing_gate = _TrailingCycleAmpGate(TRAILING_CYCLE_AMP_FRAC_OF_MAX_SEEN)
     for seg_i, (start_idx, end_idx, end_type) in enumerate(segments):
         if end_idx >= n or start_idx < 0:
             continue
@@ -1132,9 +1203,6 @@ def iter_sig0_overlay_segments(
             continue
         u_fit = np.asarray(fit["u_fit"], dtype=float)
         is_tension = bool(fit["is_tension"])
-        amp = float(fit["amp"])
-        if not trailing_gate.keep(amp, is_tension=is_tension):
-            continue
         sig0_norm, dbg = _sigma0_norm_from_plastic_fit(u, F, fit, points)
         j_eq = j_min_g if is_tension else j_max_g
         dbg_equiv: dict[str, float] = {}
@@ -1191,7 +1259,11 @@ def iter_sig0_overlay_segments(
                 "b": float(fit["b"]),
             }
         )
-    return out
+    return _filter_by_directional_b_iqr(
+        out,
+        b_of=lambda seg: float(seg["b"]),
+        is_tension_of=lambda seg: bool(seg["is_tension"]),
+    )
 
 
 def get_sig0_overlay_segments_one_specimen(specimen_id: str) -> list[dict[str, object]] | None:

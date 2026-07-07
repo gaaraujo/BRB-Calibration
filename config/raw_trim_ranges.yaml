@@ -17,3 +17,5 @@ PC1200A:
   exclude_ranges: [[16700, null]]
 PC1200B:
   exclude_ranges: [[16500, 17575], [28747, 30075], [41300, null]]
+STF01:
+  exclude_ranges: [[323191, 323252], [645534, null]]

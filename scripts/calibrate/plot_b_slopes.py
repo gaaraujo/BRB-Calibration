@@ -52,8 +52,7 @@ from calibrate.digitized_unordered_bn import compute_envelope_bn_unordered  # no
 from extract_bn_bp import (
     E_ksi,
     CATALOG_PATH,
-    TRAILING_CYCLE_AMP_FRAC_OF_MAX_SEEN,
-    _TrailingCycleAmpGate,
+    _filter_by_directional_b_iqr,
     _segment_line_data,
     _segments_opposite_peak_to_peak,
     get_specimens_with_resampled,
@@ -118,7 +117,6 @@ def plot_one_specimen(specimen_id: str, catalog_row: pd.Series, out_dir: Path) -
     segments = _segments_opposite_peak_to_peak(points)
     # One row per kept branch (opposite peak → peak): b-fit overlay data only.
     kept_halfcycles: list[tuple[bool, float, np.ndarray, np.ndarray, int]] = []
-    trailing_gate = _TrailingCycleAmpGate(TRAILING_CYCLE_AMP_FRAC_OF_MAX_SEEN)
     for seg_i, (start_idx, end_idx, end_type) in enumerate(segments):
         if end_idx >= n or start_idx < 0:
             continue
@@ -143,9 +141,16 @@ def plot_one_specimen(specimen_id: str, catalog_row: pd.Series, out_dir: Path) -
         b, u_line, F_line, is_tension, amp, j_fit0 = result
         if is_tension != is_tension_seg:
             continue
-        if not trailing_gate.keep(float(amp), is_tension=is_tension):
-            continue
         kept_halfcycles.append((is_tension, b, u_line, F_line, int(j_fit0)))
+
+    kept_halfcycles = [
+        (bool(hc[0]), float(hc[1]), hc[2], hc[3], int(hc[4]))
+        for hc in _filter_by_directional_b_iqr(
+            kept_halfcycles,
+            b_of=lambda hc: float(hc[1]),
+            is_tension_of=lambda hc: bool(hc[0]),
+        )
+    ]
 
     # Colors: experimental hysteresis from ``plot_dimensions``; model fits in red/blue (color-blind friendly)
     COLOR_TENSION = "#CC3311"    # red tone (fitted b_p; distinguishable from blue for protan/deutan)

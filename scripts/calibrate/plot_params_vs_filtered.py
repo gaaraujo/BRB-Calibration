@@ -49,6 +49,11 @@ from calibrate.calibration_paths import (  # noqa: E402
     PLOTS_INDIVIDUAL_OPTIMIZE,
 )
 from calibrate.optimize_brb_mse import run_simulation_kwargs_from_prow  # noqa: E402
+from calibrate.overlay_axis_specs import (  # noqa: E402
+    ForceDefOverlayAxisSpecs,
+    apply_symmetric_axis_specs,
+    compute_force_def_overlay_axis_specs,
+)
 from calibrate.params_to_optimize import SIM_PARAMS_FROM_ROW  # noqa: E402
 from calibrate.digitized_unordered_eval_lib import (  # noqa: E402
     DEFAULT_BINENV_N_BINS,
@@ -169,13 +174,94 @@ def _write_overlay_params_txt(
     sim_kw: dict[str, float],
     force_deformation_csv: Path | None = None,
 ) -> Path:
-    txt_path = out_dir / f"{specimen_id}_set{set_id}_force_def.txt"
+    txt_path = out_dir / f"{specimen_id}_set{set_id}_params.txt"
     txt_path.write_text(
         _format_overlay_params_txt(
             specimen_id=specimen_id,
             set_id=set_id,
             steel_model=steel_model,
             sim_kw=sim_kw,
+            force_deformation_csv=force_deformation_csv,
+        ),
+        encoding="utf-8",
+    )
+    return txt_path
+
+
+def _format_fixed_width_table(
+    headers: list[str],
+    rows: list[list[str]],
+) -> list[str]:
+    """Return text lines for a fixed-width table (first column left, others right-aligned)."""
+    if not headers:
+        return []
+    ncols = len(headers)
+    widths = [max(len(headers[0]), *(len(row[0]) for row in rows if row))]
+    for j in range(1, ncols):
+        col_w = len(headers[j])
+        for row in rows:
+            if j < len(row):
+                col_w = max(col_w, len(row[j]))
+        widths.append(col_w)
+
+    def _fmt(cells: list[str]) -> str:
+        out: list[str] = []
+        for j, cell in enumerate(cells):
+            if j >= ncols:
+                break
+            out.append(cell.ljust(widths[j]) if j == 0 else cell.rjust(widths[j]))
+        return "  ".join(out)
+
+    lines = [_fmt(headers)]
+    lines.append(_fmt(["-" * w for w in widths]))
+    lines.extend(_fmt(row) for row in rows)
+    return lines
+
+
+def _format_all_sets_params_txt(
+    *,
+    specimen_id: str,
+    set_blocks: list[tuple[int | str, str, dict[str, float]]],
+    force_deformation_csv: Path | None = None,
+) -> str:
+    lines = [f"specimen: {specimen_id}"]
+    if force_deformation_csv is not None:
+        lines.append(f"force_deformation: {force_deformation_csv}")
+    if not set_blocks:
+        return "\n".join(lines) + "\n"
+
+    set_ids = [str(sid) for sid, _, _ in set_blocks]
+    headers = ["param", *set_ids]
+    table_rows: list[list[str]] = [
+        ["steel_model", *[sm for _, sm, _ in set_blocks]],
+    ]
+    for key in SIM_PARAMS_FROM_ROW:
+        values = [
+            _format_overlay_param_value(key, sim_kw[key]) if key in sim_kw else ""
+            for _, _, sim_kw in set_blocks
+        ]
+        if any(values):
+            table_rows.append([key, *values])
+
+    lines.append("")
+    lines.extend(_format_fixed_width_table(headers, table_rows))
+    return "\n".join(lines) + "\n"
+
+
+def _write_all_sets_params_txt(
+    out_dir: Path,
+    *,
+    specimen_id: str,
+    set_blocks: list[tuple[int | str, str, dict[str, float]]],
+    force_deformation_csv: Path | None = None,
+) -> Path | None:
+    if not set_blocks:
+        return None
+    txt_path = out_dir / f"{specimen_id}_setALL_params.txt"
+    txt_path.write_text(
+        _format_all_sets_params_txt(
+            specimen_id=specimen_id,
+            set_blocks=set_blocks,
             force_deformation_csv=force_deformation_csv,
         ),
         encoding="utf-8",
@@ -260,6 +346,7 @@ def plot_force_def_overlays(
     set_id: int | str,
     out_dir: Path,
     norm_xy_half: tuple[float, float] | None = None,
+    overlay_axes: ForceDefOverlayAxisSpecs | None = None,
     numerical_color: str = COLOR_NUMERICAL_COHORT,
     show_numerical_curve: bool = True,
 ) -> None:
@@ -289,7 +376,14 @@ def plot_force_def_overlays(
                 linestyle="--",
                 label="Numerical",
             )
-        set_symmetric_axes(ax1, displacement_in, np.concatenate(y_phys_components))
+        if overlay_axes is not None:
+            apply_symmetric_axis_specs(
+                ax1,
+                x=overlay_axes.physical_x,
+                y=overlay_axes.physical_y,
+            )
+        else:
+            set_symmetric_axes(ax1, displacement_in, np.concatenate(y_phys_components))
         ax1.set_xlabel("Deformation [in]")
         ax1.set_ylabel(PHYS_FORCE_KIP_LABEL)
         h1, lab1 = ax1.get_legend_handles_labels()
@@ -339,15 +433,23 @@ def plot_force_def_overlays(
                 label="Numerical",
             )
             y_norm_components.append(F_sim_norm)
-        if norm_xy_half is not None:
+        if overlay_axes is not None and norm_xy_half is None:
+            apply_symmetric_axis_specs(
+                ax2,
+                x=overlay_axes.normalized_x,
+                y=overlay_axes.normalized_y,
+                normalized_strain_x=True,
+            )
+        elif norm_xy_half is not None:
             hx, hy = norm_xy_half
             ax2.set_xlim(-hx, hx)
             ax2.set_ylim(-hy, hy)
+            apply_normalized_fu_axes(ax2)
         else:
             set_symmetric_axes(ax2, disp_norm, np.concatenate(y_norm_components))
+            apply_normalized_fu_axes(ax2)
         ax2.set_xlabel(NORM_STRAIN_LABEL)
         ax2.set_ylabel(NORM_FORCE_LABEL)
-        apply_normalized_fu_axes(ax2)
         h2, lab2 = ax2.get_legend_handles_labels()
         fig2.legend(
             h2,
@@ -654,6 +756,8 @@ def run_one_specimen(
 
     displacement = df["Deformation[in]"].to_numpy(dtype=float)
     F_exp = df["Force[kip]"].to_numpy(dtype=float)
+    set_param_blocks: list[tuple[int | str, str, dict[str, float]]] = []
+    completed: list[tuple[int | str, str, dict[str, float], np.ndarray]] = []
 
     for _, prow in params_rows.iterrows():
         set_id = prow.get("set_id", 1)
@@ -691,6 +795,25 @@ def run_one_specimen(
             )
             continue
 
+        completed.append((set_id, sm, sim_kw, F_sim))
+
+    overlay_axes: ForceDefOverlayAxisSpecs | None = None
+    if completed:
+        overlay_axes = compute_force_def_overlay_axis_specs(
+            displacement,
+            F_exp,
+            [
+                (
+                    F_sim,
+                    float(sim_kw["fyp"]),
+                    float(sim_kw["A_sc"]),
+                    float(sim_kw["L_y"]),
+                )
+                for _, _, sim_kw, F_sim in completed
+            ],
+        )
+
+    for set_id, sm, sim_kw, F_sim in completed:
         plot_force_def_overlays(
             specimen_id,
             displacement,
@@ -702,6 +825,7 @@ def run_one_specimen(
             set_id=set_id,
             out_dir=out_dir,
             norm_xy_half=norm_xy_half,
+            overlay_axes=overlay_axes,
         )
         _write_overlay_params_txt(
             out_dir,
@@ -711,7 +835,17 @@ def run_one_specimen(
             sim_kw=sim_kw,
             force_deformation_csv=csv_path,
         )
+        set_param_blocks.append((set_id, sm, sim_kw))
         print(f"  Saved plots for {specimen_id}, set {set_id}")
+
+    all_params_path = _write_all_sets_params_txt(
+        out_dir,
+        specimen_id=specimen_id,
+        set_blocks=set_param_blocks,
+        force_deformation_csv=csv_path,
+    )
+    if all_params_path is not None:
+        print(f"  Wrote combined params: {all_params_path}")
 
 
 def write_one_specimen_simulated_csvs(
