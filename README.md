@@ -224,7 +224,7 @@ $$\hat{E} = Q\,E$$
 
 so that the end stiffness of the single bar matches the **series** axial response of core plus transitions. **`compute_Q()`** in [`scripts/model/brace_geometry.py`](scripts/model/brace_geometry.py) implements
 
-$$Q = \frac{1}{\displaystyle\frac{2(L_T - L_y)/L_T}{A_t/A_{\mathrm{sc}}} + \frac{L_y}{L_T}} = \frac{L_T}{\,2(L_T - L_y)\,\dfrac{A_{\mathrm{sc}}}{A_t} + L_y\,}\,.$$
+$$Q = \frac{1}{\displaystyle\frac{L_y}{L_T} + \frac{L_T - L_y}{L_T}\,\frac{A_{\mathrm{sc}}}{A_t}} = \frac{L_T}{\,L_y + (L_T - L_y)\,\dfrac{A_{\mathrm{sc}}}{A_t}\,}\,.$$
 
 Require $L_T, A_{\mathrm{sc}}, A_t > 0$ and $0 \leq L_y \leq L_T$; if $L_y = L_T$ the transition term vanishes and $Q = 1$.
 

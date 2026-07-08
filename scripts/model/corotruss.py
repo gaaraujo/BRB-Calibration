@@ -60,7 +60,7 @@ def run_simulation(
     Run the BRB corotruss simulation and return force history for the given displacement history.
 
     Young's modulus is adjusted with E_hat = Q*E, where
-    Q = 1 / ( (2(L_T - L_y)/L_T)/(A_t/A_sc) + L_y/L_T ).
+    Q = L_T / (L_y + (L_T - L_y) * A_sc / A_t).
 
     ``steel_model`` selects SteelMPF or Steel4.
     """

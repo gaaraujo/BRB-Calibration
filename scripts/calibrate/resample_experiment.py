@@ -22,7 +22,7 @@ def compute_Q_brace(L_T: float, L_y: float, A_sc: float, A_t: float) -> float:
         raise ValueError("L_T, A_sc, and A_t must be positive.")
     if L_y < 0 or L_y > L_T:
         raise ValueError("L_y must be in [0, L_T].")
-    term_non_yielding = (2.0 * (L_T - L_y) / L_T) / (A_t / A_sc)
+    term_non_yielding = ((L_T - L_y) / L_T) * (A_sc / A_t)
     term_yielding = L_y / L_T
     return 1.0 / (term_non_yielding + term_yielding)
 
