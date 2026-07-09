@@ -5,7 +5,7 @@ from dataclasses import dataclass
 
 import numpy as np
 from matplotlib.axes import Axes
-from matplotlib.ticker import MultipleLocator
+from matplotlib.ticker import FormatStrFormatter, MultipleLocator
 
 from postprocess.plot_specimens import apply_normalized_fu_axes
 
@@ -109,16 +109,31 @@ def compute_force_def_overlay_axis_specs(
     )
 
 
+def symmetric_axis_spec(half_data: float, *, normalized_strain: bool = False) -> SymmetricAxisSpec:
+    """Symmetric limit/step for one overlay axis from a positive data half-range."""
+    return _axis_spec(half_data, normalized_strain=normalized_strain)
+
+
+# Fixed symmetric limits for combined calibration overlay montages (normalized F–δ).
+# Strain x-axis ticks show percent (``apply_normalized_fu_axes``); data are δ/L_y fractions.
+COMBINED_NORM_OVERLAY_X = SymmetricAxisSpec(half=0.04, step=0.02)  # ±4 %
+COMBINED_NORM_OVERLAY_Y = SymmetricAxisSpec(half=2.5, step=2.0)  # limits ±2.5; ticks -2, 0, 2
+
+
 def apply_symmetric_axis_specs(
     ax: Axes,
     *,
     x: SymmetricAxisSpec,
     y: SymmetricAxisSpec,
     normalized_strain_x: bool = False,
+    pct_decimals: int = 2,
+    norm_force_decimals: int | None = None,
 ) -> None:
     ax.set_xlim(-x.half, x.half)
     ax.set_ylim(-y.half, y.half)
     ax.xaxis.set_major_locator(MultipleLocator(x.step))
     ax.yaxis.set_major_locator(MultipleLocator(y.step))
     if normalized_strain_x:
-        apply_normalized_fu_axes(ax)
+        apply_normalized_fu_axes(ax, pct_decimals=pct_decimals)
+    if norm_force_decimals is not None:
+        ax.yaxis.set_major_formatter(FormatStrFormatter(f"%.{int(norm_force_decimals)}f"))

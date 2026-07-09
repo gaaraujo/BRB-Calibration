@@ -19,6 +19,9 @@ Generalized figures use ``#001F3F`` solid ``Numerical (train)`` vs ``#FF0E00`` `
 for specimens outside the training set (catalog ``generalized_weight`` zero, or digitized unordered panels).
 Individual combined figures use the train color only.
 Default targets: individual (3 columns) and generalized (4 columns).
+
+Use ``--ignore NAME [NAME ...]`` to omit specimens from the combined grid (simulated CSVs are
+unchanged; only the montage panels are dropped).
 """
 from __future__ import annotations
 
@@ -52,6 +55,11 @@ from calibrate.calibration_paths import (  # noqa: E402
     PLOTS_INDIVIDUAL_OPTIMIZE,
 )
 from calibrate.digitized_unordered_eval_lib import load_digitized_unordered_series  # noqa: E402
+from calibrate.overlay_axis_specs import (  # noqa: E402
+    COMBINED_NORM_OVERLAY_X,
+    COMBINED_NORM_OVERLAY_Y,
+    apply_symmetric_axis_specs,
+)
 from calibrate.plot_params_vs_filtered import (  # noqa: E402
     DIGITIZED_UNORDERED_LEGEND_MARKERSIZE_PT,
     DIGITIZED_UNORDERED_OVERLAY_SCATTER_S,
@@ -74,8 +82,6 @@ from postprocess.plot_dimensions import (  # noqa: E402
 from postprocess.plot_specimens import (  # noqa: E402
     NORM_FORCE_LABEL,
     NORM_STRAIN_LABEL,
-    apply_normalized_fu_axes,
-    compute_raw_filtered_global_norm_limits,
 )
 from specimen_catalog import get_specimen_record, read_catalog, uses_unordered_inputs  # noqa: E402
 
@@ -214,6 +220,23 @@ def _order_specimens(names: set[str], catalog_names: list[str]) -> list[str]:
     ordered = [n for n in catalog_names if n in names]
     tail = sorted(names - cat_set)
     return ordered + tail
+
+
+def _normalize_specimen_name(name: str) -> str:
+    return str(name).strip()
+
+
+def _filter_ignored_specimens(
+    specimen_names: list[str],
+    ignore: list[str],
+) -> list[str]:
+    """Drop ``ignore`` names from the combined-grid specimen list (order preserved)."""
+    if not ignore:
+        return specimen_names
+    ignore_set = {_normalize_specimen_name(n) for n in ignore if _normalize_specimen_name(n)}
+    if not ignore_set:
+        return specimen_names
+    return [n for n in specimen_names if _normalize_specimen_name(n) not in ignore_set]
 
 
 def _specimen_is_unordered_digitized(name: str, catalog: pd.DataFrame) -> bool:
@@ -414,7 +437,8 @@ def _plot_one_subplot_norm(
     catalog: pd.DataFrame,
     params_df: pd.DataFrame,
     *,
-    norm_xy_half: tuple[float, float],
+    norm_x_half: float,
+    norm_y_half: float,
     numerical_color: str,
 ) -> None:
     """One normalized overlay cell for combined montage."""
@@ -445,7 +469,7 @@ def _plot_one_subplot_norm(
     F_exp = df["Force[kip]"].to_numpy(dtype=float) if "Force[kip]" in df.columns else np.full_like(D, np.nan)
 
     is_unordered = _specimen_is_unordered_digitized(specimen_id, catalog)
-    hx, hy = norm_xy_half
+    hx, hy = norm_x_half, norm_y_half
 
     if is_unordered:
         series = load_digitized_unordered_series(
@@ -506,11 +530,17 @@ def _plot_one_subplot_norm(
     ax.set_xlim(-hx, hx)
     ax.set_ylim(-hy, hy)
     ax.set_title(specimen_id)
-    apply_normalized_fu_axes(ax, pct_decimals=0)
     ax.grid(True, alpha=0.3)
     ax.axhline(0, color="k", linewidth=AXES_SPINE_LINEWIDTH)
     ax.axvline(0, color="k", linewidth=AXES_SPINE_LINEWIDTH)
     style_axes_spines_and_ticks(ax)
+
+
+def _label_outer_visible_panels(axs: np.ndarray, n_panels: int, ncol: int) -> None:
+    """Perimeter tick labels on each visible panel (works with global sharex/sharey)."""
+    for j in range(n_panels):
+        row, col = j // ncol, j % ncol
+        axs[row, col].label_outer()
 
 
 def plot_combined_for_set(
@@ -538,22 +568,19 @@ def plot_combined_for_set(
         return False
     ncol = max(1, int(grid_cols))
     nrow = int(np.ceil(n / ncol))
-    norm_xy_half = compute_raw_filtered_global_norm_limits(
-        catalog,
-        project_root=_PROJECT_ROOT,
-        specimens=specimen_names,
-    )
+    x_spec = COMBINED_NORM_OVERLAY_X
+    y_spec = COMBINED_NORM_OVERLAY_Y
 
-    # ``sharex='col'`` / ``sharey='row'``: same limits across the grid, but each column gets x tick
-    # labels on its bottom axis and each row gets y labels on its left (not a single global axis).
+    # Global sharex/sharey: uneven column heights (empty bottom cells) break sharex='col'
+    # tick-label placement; label_outer() restores bottom-row x labels on every column.
     with plt.rc_context(overlay_grid_montage_rcparams()):
         fig, axs = plt.subplots(
             nrow,
             ncol,
             figsize=figsize_for_grid(nrow, ncol),
             layout="constrained",
-            sharex="col",
-            sharey="row",
+            sharex=True,
+            sharey=True,
             squeeze=False,
         )
         axs = np.asarray(axs).reshape(nrow, ncol)
@@ -573,7 +600,8 @@ def plot_combined_for_set(
                     csv_p,
                     catalog,
                     params_df,
-                    norm_xy_half=norm_xy_half,
+                    norm_x_half=x_spec.half,
+                    norm_y_half=y_spec.half,
                     numerical_color=_numerical_color_for_combined_cell(sid_name, catalog, stage_weight_fn),
                 )
             else:
@@ -584,6 +612,16 @@ def plot_combined_for_set(
         for j in range(n, n_cells):
             r, c = j // ncol, j % ncol
             axs[r, c].set_visible(False)
+
+        apply_symmetric_axis_specs(
+            axs[0, 0],
+            x=x_spec,
+            y=y_spec,
+            normalized_strain_x=True,
+            pct_decimals=0,
+            norm_force_decimals=0,
+        )
+        _label_outer_visible_panels(axs, n, ncol)
 
         leg_h, leg_lab, leg_handler_map = _combined_overlay_legend_handles_labels_and_handler_map(
             specimen_names,
@@ -642,6 +680,16 @@ def main() -> None:
             "Default: inferred from calibration layout."
         ),
     )
+    p.add_argument(
+        "--ignore",
+        nargs="*",
+        default=[],
+        metavar="NAME",
+        help=(
+            "Specimen Name(s) to omit from combined grid figures "
+            "(e.g. --ignore STF01 or --ignore STF01 PC250)."
+        ),
+    )
     args = p.parse_args()
 
     catalog = read_catalog(CATALOG_PATH)
@@ -679,6 +727,11 @@ def main() -> None:
     # ``..._simulated_force/config_set_K``.
     targets = tuple(_expand_config_set_targets(targets))
 
+    ignore_names = [_normalize_specimen_name(n) for n in args.ignore]
+    ignore_names = [n for n in ignore_names if n]
+    if ignore_names:
+        print(f"Ignoring specimens in combined grids: {ignore_names}")
+
     any_written = False
     for out_dir, params_csv, sim_dir, grid_cols in targets:
         w_fn = _stage_weight_fn_for_overlay_out_dir(out_dir, catalog)
@@ -688,6 +741,10 @@ def main() -> None:
             continue
         for set_id in sorted(idx.keys()):
             specimen_names = _order_specimens(idx[set_id], catalog_names)
+            specimen_names = _filter_ignored_specimens(specimen_names, ignore_names)
+            if not specimen_names:
+                print(f"  (skip set {set_id}) All specimens ignored under {sim_dir}")
+                continue
             if plot_combined_for_set(
                 set_id,
                 specimen_names,
